@@ -28,64 +28,68 @@ local size = 12
 local hitboxTransparency = 0.9
 local hitboxColor = Color3.fromRGB(255, 0, 0)
 
-local function removeHitbox(character)
-    local old = character:FindFirstChild("ExpandedHitbox")
-    if old then
-        old:Destroy()
+local originalRoots = setmetatable({}, { __mode = "k" })
+
+local function getRoot(player)
+    local character = player.Character
+    return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function restoreRoot(root)
+    local saved = originalRoots[root]
+    if not saved then
+        return
+    end
+    originalRoots[root] = nil
+    if root.Parent then
+        root.Size = saved.Size
+        root.Transparency = saved.Transparency
+        root.Color = saved.Color
+        root.Material = saved.Material
+        root.CanCollide = saved.CanCollide
     end
 end
 
-local function applyHitbox(character)
-    removeHitbox(character)
-    local root = character:FindFirstChild("HumanoidRootPart")
-    if not root then
-        return
+local function applyRoot(root)
+    if not originalRoots[root] then
+        originalRoots[root] = {
+            Size = root.Size,
+            Transparency = root.Transparency,
+            Color = root.Color,
+            Material = root.Material,
+            CanCollide = root.CanCollide,
+        }
     end
-    local hitbox = Instance.new("Part")
-    hitbox.Name = "ExpandedHitbox"
-    hitbox.Size = Vector3.new(size, size, size)
-    hitbox.Transparency = hitboxTransparency
-    hitbox.Color = hitboxColor
-    hitbox.Material = Enum.Material.SmoothPlastic
-    hitbox.CanCollide = false
-    hitbox.Massless = true
-    hitbox.CFrame = root.CFrame
-    hitbox.Parent = character
-    local weld = Instance.new("WeldConstraint")
-    weld.Part0 = root
-    weld.Part1 = hitbox
-    weld.Parent = hitbox
+    local target = Vector3.new(size, size, size)
+    if root.Size ~= target then
+        root.Size = target
+    end
+    root.Transparency = hitboxTransparency
+    root.Color = hitboxColor
+    root.Material = Enum.Material.SmoothPlastic
+    root.CanCollide = false
 end
 
 local function refresh()
     for _, player in Players:GetPlayers() do
-        if player ~= LocalPlayer and player.Character then
-            if enabled then
-                applyHitbox(player.Character)
-            else
-                removeHitbox(player.Character)
+        if player ~= LocalPlayer then
+            local root = getRoot(player)
+            if root then
+                if enabled then
+                    applyRoot(root)
+                else
+                    restoreRoot(root)
+                end
             end
         end
     end
 end
 
-local function setup(player)
-    if player == LocalPlayer then
-        return
+RunService.Heartbeat:Connect(function()
+    if enabled then
+        refresh()
     end
-    player.CharacterAdded:Connect(function(character)
-        character:WaitForChild("HumanoidRootPart")
-        if enabled then
-            applyHitbox(character)
-        end
-    end)
-end
-
-Players.PlayerAdded:Connect(setup)
-
-for _, player in Players:GetPlayers() do
-    setup(player)
-end
+end)
 
 local antiConnection
 local blockedStates = {
