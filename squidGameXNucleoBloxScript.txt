@@ -1,0 +1,2204 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+local FRONTMAN_ATTRIBUTE = "IsFrontman"
+local HNS_SEEKER_TEAM = "red"
+local HNS_HIDER_TEAM = "blue"
+local KNIFE_NAMES = { "knife", "cuchillo" }
+local FIST_NAMES = { "fist", "punch", "puño", "puno" }
+local ESCAPE_NAMES = { "escape", "exit", "finish", "goal", "salida" }
+
+local function notify(title, content)
+    pcall(function()
+        WindUI:Notify({
+            Title = title,
+            Content = content,
+            Duration = 4,
+        })
+    end)
+end
+
+local enabled = false
+local size = 12
+local hitboxTransparency = 0.9
+local hitboxColor = Color3.fromRGB(255, 0, 0)
+
+local function removeHitbox(character)
+    local old = character:FindFirstChild("ExpandedHitbox")
+    if old then
+        old:Destroy()
+    end
+end
+
+local function applyHitbox(character)
+    removeHitbox(character)
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        return
+    end
+    local hitbox = Instance.new("Part")
+    hitbox.Name = "ExpandedHitbox"
+    hitbox.Size = Vector3.new(size, size, size)
+    hitbox.Transparency = hitboxTransparency
+    hitbox.Color = hitboxColor
+    hitbox.Material = Enum.Material.SmoothPlastic
+    hitbox.CanCollide = false
+    hitbox.Massless = true
+    hitbox.CFrame = root.CFrame
+    hitbox.Parent = character
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = root
+    weld.Part1 = hitbox
+    weld.Parent = hitbox
+end
+
+local function refresh()
+    for _, player in Players:GetPlayers() do
+        if player ~= LocalPlayer and player.Character then
+            if enabled then
+                applyHitbox(player.Character)
+            else
+                removeHitbox(player.Character)
+            end
+        end
+    end
+end
+
+local function setup(player)
+    if player == LocalPlayer then
+        return
+    end
+    player.CharacterAdded:Connect(function(character)
+        character:WaitForChild("HumanoidRootPart")
+        if enabled then
+            applyHitbox(character)
+        end
+    end)
+end
+
+Players.PlayerAdded:Connect(setup)
+
+for _, player in Players:GetPlayers() do
+    setup(player)
+end
+
+local antiConnection
+local blockedStates = {
+    Enum.HumanoidStateType.Ragdoll,
+    Enum.HumanoidStateType.FallingDown,
+}
+
+local function setStates(humanoid, value)
+    for _, state in blockedStates do
+        humanoid:SetStateEnabled(state, value)
+    end
+end
+
+local function startAntiRagdoll()
+    if antiConnection then
+        return
+    end
+    antiConnection = RunService.Heartbeat:Connect(function()
+        local character = LocalPlayer.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then
+            return
+        end
+        setStates(humanoid, false)
+        if humanoid.PlatformStand and not LocalPlayer:GetAttribute("FlyActive") then
+            humanoid.PlatformStand = false
+        end
+        local state = humanoid:GetState()
+        if state == Enum.HumanoidStateType.Ragdoll or state == Enum.HumanoidStateType.FallingDown then
+            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+        for _, descendant in character:GetDescendants() do
+            if descendant:IsA("Motor6D") then
+                descendant.Enabled = true
+            elseif descendant:IsA("BallSocketConstraint") then
+                descendant.Enabled = false
+            end
+        end
+    end)
+end
+
+local function stopAntiRagdoll()
+    if antiConnection then
+        antiConnection:Disconnect()
+        antiConnection = nil
+    end
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        setStates(humanoid, true)
+    end
+end
+
+local speedValue = 50
+local speedConnection
+
+local function startSpeed()
+    if speedConnection then
+        return
+    end
+    speedConnection = RunService.Heartbeat:Connect(function()
+        local character = LocalPlayer.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.WalkSpeed = speedValue
+        end
+    end)
+end
+
+local function stopSpeed()
+    if speedConnection then
+        speedConnection:Disconnect()
+        speedConnection = nil
+    end
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.WalkSpeed = 16
+    end
+end
+
+local noclipConnection
+local noclipChanged = {}
+
+local function startNoclip()
+    if noclipConnection then
+        return
+    end
+    noclipConnection = RunService.Stepped:Connect(function()
+        local character = LocalPlayer.Character
+        if not character then
+            return
+        end
+        for _, part in character:GetDescendants() do
+            if part:IsA("BasePart") and part.CanCollide then
+                noclipChanged[part] = true
+                part.CanCollide = false
+            end
+        end
+    end)
+end
+
+local function stopNoclip()
+    if noclipConnection then
+        noclipConnection:Disconnect()
+        noclipConnection = nil
+    end
+    for part in noclipChanged do
+        if part.Parent then
+            part.CanCollide = true
+        end
+    end
+    table.clear(noclipChanged)
+end
+
+local infiniteJumpConnection
+
+local function startInfiniteJump()
+    if infiniteJumpConnection then
+        return
+    end
+    infiniteJumpConnection = UserInputService.JumpRequest:Connect(function()
+        local character = LocalPlayer.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end)
+end
+
+local function stopInfiniteJump()
+    if infiniteJumpConnection then
+        infiniteJumpConnection:Disconnect()
+        infiniteJumpConnection = nil
+    end
+end
+
+local flyEnabled = false
+local flySpeed = 60
+local flyConnection
+local flyVelocity
+local flyGyro
+
+local function stopFly()
+    if flyConnection then
+        flyConnection:Disconnect()
+        flyConnection = nil
+    end
+    if flyVelocity then
+        flyVelocity:Destroy()
+        flyVelocity = nil
+    end
+    if flyGyro then
+        flyGyro:Destroy()
+        flyGyro = nil
+    end
+    LocalPlayer:SetAttribute("FlyActive", nil)
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.PlatformStand = false
+    end
+end
+
+local function startFly()
+    stopFly()
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid then
+        return
+    end
+    LocalPlayer:SetAttribute("FlyActive", true)
+    humanoid.PlatformStand = true
+    flyVelocity = Instance.new("BodyVelocity")
+    flyVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    flyVelocity.Velocity = Vector3.zero
+    flyVelocity.Parent = root
+    flyGyro = Instance.new("BodyGyro")
+    flyGyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    flyGyro.P = 9e4
+    flyGyro.Parent = root
+    flyConnection = RunService.RenderStepped:Connect(function()
+        local camera = workspace.CurrentCamera
+        local direction = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            direction += camera.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            direction -= camera.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            direction += camera.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            direction -= camera.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            direction += Vector3.yAxis
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+            direction -= Vector3.yAxis
+        end
+        if direction.Magnitude > 0 then
+            flyVelocity.Velocity = direction.Unit * flySpeed
+        else
+            flyVelocity.Velocity = Vector3.zero
+        end
+        flyGyro.CFrame = camera.CFrame
+    end)
+end
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+    if flyEnabled then
+        character:WaitForChild("HumanoidRootPart")
+        character:WaitForChild("Humanoid")
+        startFly()
+    end
+end)
+
+local espHighlightEnabled = false
+local espNamesEnabled = false
+local espTracersEnabled = false
+local tracers = {}
+local WHITE = Color3.fromRGB(255, 255, 255)
+
+local function removeTracer(player)
+    local line = tracers[player]
+    if line then
+        line:Remove()
+        tracers[player] = nil
+    end
+end
+
+Players.PlayerRemoving:Connect(removeTracer)
+
+local function updateEsp()
+    local camera = workspace.CurrentCamera
+    local viewport = camera.ViewportSize
+    local localCharacter = LocalPlayer.Character
+    local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
+    for _, player in Players:GetPlayers() do
+        if player ~= LocalPlayer then
+            local character = player.Character
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            local head = character and character:FindFirstChild("Head")
+
+            local highlight = character and character:FindFirstChild("ESPHighlight")
+            if character and espHighlightEnabled then
+                if not highlight then
+                    highlight = Instance.new("Highlight")
+                    highlight.Name = "ESPHighlight"
+                    highlight.FillColor = Color3.fromRGB(255, 0, 0)
+                    highlight.OutlineColor = WHITE
+                    highlight.FillTransparency = 0.5
+                    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    highlight.Parent = character
+                end
+            elseif highlight then
+                highlight:Destroy()
+            end
+
+            local billboard = head and head:FindFirstChild("ESPName")
+            if head and espNamesEnabled then
+                if not billboard then
+                    billboard = Instance.new("BillboardGui")
+                    billboard.Name = "ESPName"
+                    billboard.AlwaysOnTop = true
+                    billboard.Size = UDim2.fromOffset(200, 30)
+                    billboard.StudsOffset = Vector3.new(0, 3, 0)
+                    local label = Instance.new("TextLabel")
+                    label.Name = "Label"
+                    label.Size = UDim2.fromScale(1, 1)
+                    label.BackgroundTransparency = 1
+                    label.TextColor3 = WHITE
+                    label.TextStrokeTransparency = 0
+                    label.Font = Enum.Font.GothamBold
+                    label.TextSize = 14
+                    label.Parent = billboard
+                    billboard.Parent = head
+                end
+                local label = billboard:FindFirstChild("Label")
+                if label then
+                    local distance = 0
+                    if localRoot and root then
+                        distance = (localRoot.Position - root.Position).Magnitude
+                    end
+                    label.Text = player.Name .. " [" .. math.floor(distance) .. "]"
+                end
+            elseif billboard then
+                billboard:Destroy()
+            end
+
+            if espTracersEnabled and root and Drawing then
+                local line = tracers[player]
+                if not line then
+                    line = Drawing.new("Line")
+                    line.Thickness = 1
+                    line.Color = WHITE
+                    tracers[player] = line
+                end
+                local point, onScreen = camera:WorldToViewportPoint(root.Position)
+                if onScreen then
+                    line.From = Vector2.new(viewport.X / 2, viewport.Y)
+                    line.To = Vector2.new(point.X, point.Y)
+                    line.Visible = true
+                else
+                    line.Visible = false
+                end
+            else
+                removeTracer(player)
+            end
+        end
+    end
+end
+
+RunService.RenderStepped:Connect(updateEsp)
+
+local ammoConnection
+
+local function fillTool(tool)
+    if not tool:IsA("Tool") then
+        return
+    end
+    local ammo = tool:FindFirstChild("CurrentAmmo")
+    if ammo and ammo.Value ~= 999 then
+        ammo.Value = 999
+    end
+    local reserve = tool:GetAttribute("Ammo")
+    if reserve ~= nil and reserve ~= 999 then
+        tool:SetAttribute("Ammo", 999)
+    end
+end
+
+local function startAmmo()
+    if ammoConnection then
+        return
+    end
+    ammoConnection = RunService.Heartbeat:Connect(function()
+        local character = LocalPlayer.Character
+        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if character then
+            for _, child in character:GetChildren() do
+                fillTool(child)
+            end
+        end
+        if backpack then
+            for _, child in backpack:GetChildren() do
+                fillTool(child)
+            end
+        end
+    end)
+end
+
+local function stopAmmo()
+    if ammoConnection then
+        ammoConnection:Disconnect()
+        ammoConnection = nil
+    end
+end
+
+local originalCheckOwned
+
+local function getSkinsShop()
+    local ok, result = pcall(function()
+        local playerScripts = LocalPlayer:WaitForChild("PlayerScripts")
+        return require(playerScripts.Client.UIs.SkinsShop)
+    end)
+    if ok then
+        return result
+    end
+end
+
+local function setAllSkinsOwned(state)
+    local skinsShop = getSkinsShop()
+    if not skinsShop then
+        return
+    end
+    if state then
+        if not originalCheckOwned then
+            originalCheckOwned = skinsShop.checkOwned
+        end
+        skinsShop.checkOwned = function()
+            return true
+        end
+    elseif originalCheckOwned then
+        skinsShop.checkOwned = originalCheckOwned
+    end
+end
+
+local originalFire
+
+local function getGunSystem()
+    local ok, result = pcall(function()
+        return ReplicatedStorage:WaitForChild("Local"):WaitForChild("GunSystem")
+    end)
+    if ok then
+        return result
+    end
+end
+
+local function getBulletWeapon()
+    local ok, result = pcall(function()
+        return require(getGunSystem().WeaponTypes.BulletWeapon)
+    end)
+    if ok then
+        return result
+    end
+end
+
+local function getBaseWeapon()
+    local ok, result = pcall(function()
+        return require(getGunSystem().Libraries.BaseWeapon)
+    end)
+    if ok then
+        return result
+    end
+end
+
+local function getRole(player)
+    local team = player.Team
+    if team and (team.Name == "Detective" or team.Name == "Guard" or team.Name == "Player") then
+        return team.Name
+    end
+    if player:GetAttribute("IsDetective") then
+        return "Detective"
+    end
+    if player:GetAttribute("IsGuard") then
+        return "Guard"
+    end
+    return "Player"
+end
+
+local function canAimAt(player)
+    local myRole = getRole(LocalPlayer)
+    local role = getRole(player)
+    local isFrontman = not not player:GetAttribute(FRONTMAN_ATTRIBUTE)
+    if myRole == "Detective" then
+        return role == "Guard"
+    elseif myRole == "Guard" then
+        return role == "Detective" or (role == "Player" and not isFrontman)
+    end
+    return role == "Guard" or isFrontman
+end
+
+local function getAimTarget(origin)
+    local camera = workspace.CurrentCamera
+    local look = camera.CFrame.LookVector
+    local best
+    local bestDot = -1
+    for _, player in Players:GetPlayers() do
+        if player ~= LocalPlayer and player.Character and not player:GetAttribute("Dead") and canAimAt(player) then
+            local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+            local part = player.Character:FindFirstChild("Head") or player.Character:FindFirstChild("HumanoidRootPart")
+            if humanoid and humanoid.Health > 0 and part then
+                local offset = part.Position - origin
+                if offset.Magnitude > 0 then
+                    local dot = look:Dot(offset.Unit)
+                    if dot > bestDot then
+                        bestDot = dot
+                        best = part
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function setAimGun(state)
+    local weapon = getBulletWeapon()
+    if not weapon then
+        return
+    end
+    if state then
+        if not originalFire then
+            originalFire = weapon.fire
+        end
+        weapon.fire = function(self, origin, direction, charge)
+            local target = getAimTarget(origin)
+            if target then
+                direction = (target.Position - origin).Unit
+            end
+            return originalFire(self, origin, direction, charge)
+        end
+    elseif originalFire then
+        weapon.fire = originalFire
+    end
+end
+
+local fastBullets = false
+local bulletSpeedValue = 5000
+local fastFire = false
+local fireCooldownValue = 0.05
+local damageEnabled = false
+local damageMultiplier = 2
+local passThrough = false
+local noRecoil = false
+local bulletPatched = false
+
+local function getTargetCharacters()
+    local targets = {}
+    for _, player in Players:GetPlayers() do
+        if player ~= LocalPlayer and player.Character and not player:GetAttribute("Dead") and canAimAt(player) then
+            table.insert(targets, player.Character)
+        end
+    end
+    return targets
+end
+
+local function containsTarget(instance, targets)
+    for _, character in targets do
+        if instance == character or character:IsDescendantOf(instance) then
+            return true
+        end
+    end
+    return false
+end
+
+local function collectIgnore(parent, targets, list)
+    for _, child in parent:GetChildren() do
+        if table.find(targets, child) then
+            continue
+        elseif containsTarget(child, targets) then
+            collectIgnore(child, targets, list)
+        else
+            table.insert(list, child)
+        end
+    end
+end
+
+local function buildIgnoreList()
+    local list = {}
+    collectIgnore(workspace, getTargetCharacters(), list)
+    return list
+end
+
+local function patchBullets()
+    if bulletPatched then
+        return
+    end
+    local base = getBaseWeapon()
+    local bullet = getBulletWeapon()
+    if not base or not bullet then
+        notify("Armas", "No pude cargar los módulos del sistema de armas")
+        return
+    end
+    bulletPatched = true
+
+    local baseGetConfigValue = base.getConfigValue
+    base.getConfigValue = function(self, name, default)
+        if fastBullets and name == "BulletSpeed" then
+            return bulletSpeedValue
+        end
+        if fastFire then
+            if name == "ShotCooldown" or name == "BurstShotCooldown" then
+                return fireCooldownValue
+            end
+            if name == "FireMode" then
+                return "Automatic"
+            end
+        end
+        if damageEnabled and name == "HitDamage" then
+            local value = baseGetConfigValue(self, name, default)
+            return (tonumber(value) or 10) * damageMultiplier
+        end
+        if noRecoil and string.find(string.lower(name), "recoil", 1, true) then
+            local value = baseGetConfigValue(self, name, default)
+            if type(value) == "number" then
+                return 0
+            end
+            return value
+        end
+        return baseGetConfigValue(self, name, default)
+    end
+
+    local baseGetIgnoreList = bullet.getIgnoreList
+    for _, methodName in { "applyRecoil", "addRecoil", "recoil" } do
+        local method = base[methodName] or bullet[methodName]
+        if type(method) == "function" then
+            local owner = base[methodName] and base or bullet
+            owner[methodName] = function(self, ...)
+                if noRecoil then
+                    return
+                end
+                return method(self, ...)
+            end
+        end
+    end
+    bullet.getIgnoreList = function(self, isLocal)
+        local list = baseGetIgnoreList(self, isLocal)
+        if passThrough then
+            list = buildIgnoreList()
+            self.ignoreList = list
+        end
+        return list
+    end
+
+    local baseOnHit = bullet.onHit
+    bullet.onHit = function(self, hitInfo)
+        baseOnHit(self, hitInfo)
+        if damageEnabled and damageMultiplier > 1 and self.player == LocalPlayer then
+            local target = hitInfo.h
+            if typeof(target) == "Instance" and target:IsA("Humanoid") then
+                local remote = self.weaponsSystem.getRemoteEvent("WeaponHit")
+                for _ = 2, damageMultiplier do
+                    local copy = {}
+                    for key, value in hitInfo do
+                        copy[key] = value
+                    end
+                    remote:FireServer(self.instance, copy)
+                end
+            end
+        end
+    end
+end
+
+local instantConnection
+local originalHold = setmetatable({}, { __mode = "k" })
+
+local function applyInstant(instance)
+    if instance:IsA("ProximityPrompt") then
+        if originalHold[instance] == nil then
+            originalHold[instance] = instance.HoldDuration
+        end
+        instance.HoldDuration = 0
+    end
+end
+
+local function startInstantInteract()
+    if instantConnection then
+        return
+    end
+    for _, descendant in workspace:GetDescendants() do
+        applyInstant(descendant)
+    end
+    instantConnection = workspace.DescendantAdded:Connect(applyInstant)
+end
+
+local function stopInstantInteract()
+    if instantConnection then
+        instantConnection:Disconnect()
+        instantConnection = nil
+    end
+    for prompt, hold in originalHold do
+        if prompt.Parent then
+            prompt.HoldDuration = hold
+        end
+    end
+    table.clear(originalHold)
+end
+
+local killHidersEnabled = false
+local killSeekersEnabled = false
+local knifeFastEnabled = false
+local attackInterval = 0.1
+local lastAttack = 0
+local cooldownRestores = {}
+local boostedTools = setmetatable({}, { __mode = "k" })
+
+local function nameMatches(name, patterns)
+    local lower = string.lower(name)
+    for _, pattern in patterns do
+        if string.find(lower, pattern, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function isCooldownName(name)
+    return nameMatches(name, { "cooldown", "delay", "debounce" })
+end
+
+local function boostCooldowns(tool)
+    if boostedTools[tool] then
+        return
+    end
+    boostedTools[tool] = true
+    for name, value in tool:GetAttributes() do
+        if type(value) == "number" and isCooldownName(name) then
+            table.insert(cooldownRestores, function()
+                if tool.Parent then
+                    tool:SetAttribute(name, value)
+                end
+            end)
+            tool:SetAttribute(name, 0.05)
+        end
+    end
+    for _, descendant in tool:GetDescendants() do
+        if (descendant:IsA("NumberValue") or descendant:IsA("IntValue")) and isCooldownName(descendant.Name) then
+            local value = descendant.Value
+            table.insert(cooldownRestores, function()
+                if descendant.Parent then
+                    descendant.Value = value
+                end
+            end)
+            descendant.Value = 0.05
+        end
+    end
+end
+
+local function restoreCooldowns()
+    for _, restore in cooldownRestores do
+        restore()
+    end
+    table.clear(cooldownRestores)
+    table.clear(boostedTools)
+end
+
+local function findTool(patterns)
+    local character = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    for _, container in { character, backpack } do
+        if container then
+            for _, child in container:GetChildren() do
+                if child:IsA("Tool") and nameMatches(child.Name, patterns) then
+                    return child
+                end
+            end
+        end
+    end
+end
+
+local PUSH_TOOL_NAMES = { "push", "empuj" }
+local PUSH_VALUE_NAMES = { "force", "power", "strength", "knockback", "impulse", "launch", "magnitude", "velocity", "distance" }
+local pushBoostEnabled = false
+local pushMultiplier = 3
+local pushRestores = {}
+local pushBoosted = setmetatable({}, { __mode = "k" })
+
+local function isPushValueName(name)
+    return nameMatches(name, PUSH_VALUE_NAMES) and not isCooldownName(name)
+end
+
+local function scalePushConfig(config, depth, seen)
+    if seen[config] or depth > 3 then
+        return
+    end
+    seen[config] = true
+    for key, value in config do
+        if type(key) == "string" and type(value) == "number" and isPushValueName(key) then
+            local ok = pcall(function()
+                config[key] = value * pushMultiplier
+            end)
+            if ok then
+                table.insert(pushRestores, function()
+                    pcall(function()
+                        config[key] = value
+                    end)
+                end)
+            end
+        elseif type(value) == "table" then
+            scalePushConfig(value, depth + 1, seen)
+        end
+    end
+end
+
+local function boostPushTool(tool)
+    if pushBoosted[tool] then
+        return
+    end
+    pushBoosted[tool] = true
+    for name, value in tool:GetAttributes() do
+        if type(value) == "number" and isPushValueName(name) then
+            table.insert(pushRestores, function()
+                if tool.Parent then
+                    tool:SetAttribute(name, value)
+                end
+            end)
+            tool:SetAttribute(name, value * pushMultiplier)
+        end
+    end
+    for _, descendant in tool:GetDescendants() do
+        if (descendant:IsA("NumberValue") or descendant:IsA("IntValue")) and isPushValueName(descendant.Name) then
+            local value = descendant.Value
+            table.insert(pushRestores, function()
+                if descendant.Parent then
+                    descendant.Value = value
+                end
+            end)
+            descendant.Value = value * pushMultiplier
+        elseif descendant:IsA("ModuleScript") then
+            local ok, config = pcall(require, descendant)
+            if ok and type(config) == "table" then
+                scalePushConfig(config, 0, {})
+            end
+        end
+    end
+end
+
+local function restorePush()
+    for _, restore in pushRestores do
+        restore()
+    end
+    table.clear(pushRestores)
+    table.clear(pushBoosted)
+end
+
+local function applyPush()
+    local character = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    for _, container in { character, backpack } do
+        if container then
+            for _, child in container:GetChildren() do
+                if child:IsA("Tool") and nameMatches(child.Name, PUSH_TOOL_NAMES) then
+                    boostPushTool(child)
+                end
+            end
+        end
+    end
+end
+
+local function dumpPushTool()
+    local tool = findTool(PUSH_TOOL_NAMES)
+    if not tool then
+        notify("Lights Out", "No encontré la tool Push en tu mochila ni en tu personaje")
+        return
+    end
+    print("[Push] " .. tool:GetFullName())
+    for name, value in tool:GetAttributes() do
+        print("[Push] atributo " .. name .. " = " .. tostring(value))
+    end
+    for _, descendant in tool:GetDescendants() do
+        local line = "[Push] " .. descendant.ClassName .. " " .. descendant:GetFullName()
+        if descendant:IsA("ValueBase") then
+            line = line .. " = " .. tostring(descendant.Value)
+        end
+        print(line)
+    end
+    notify("Lights Out", "Estructura de Push impresa en la consola")
+end
+
+local function getNearestEnemy(team, root)
+    local closest
+    local shortest = math.huge
+    for _, player in Players:GetPlayers() do
+        if player ~= LocalPlayer
+            and player:GetAttribute("HideNSeek_Team") == team
+            and not player:GetAttribute("Dead")
+            and not player:GetAttribute("IsGuard")
+        then
+            local character = player.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            local targetRoot = character and character:FindFirstChild("HumanoidRootPart")
+            if humanoid and targetRoot and humanoid.Health > 0 then
+                local distance = (targetRoot.Position - root.Position).Magnitude
+                if distance < shortest then
+                    shortest = distance
+                    closest = targetRoot
+                end
+            end
+        end
+    end
+    return closest
+end
+
+local function performAttack(patterns, targetTeam, boost)
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid or humanoid.Health <= 0 then
+        return false
+    end
+    local tool = findTool(patterns)
+    if not tool then
+        return false
+    end
+    if boost then
+        boostCooldowns(tool)
+    end
+    if targetTeam then
+        local target = getNearestEnemy(targetTeam, root)
+        if not target then
+            return false
+        end
+        if tool.Parent ~= character then
+            humanoid:EquipTool(tool)
+        end
+        root.CFrame = target.CFrame * CFrame.new(0, 0, 2.5)
+        tool:Activate()
+        return true
+    end
+    if tool.Parent ~= character then
+        return false
+    end
+    tool:Activate()
+    return true
+end
+
+RunService.Heartbeat:Connect(function()
+    local now = os.clock()
+    if now - lastAttack < attackInterval then
+        return
+    end
+    local myTeam = LocalPlayer:GetAttribute("HideNSeek_Team")
+    if killHidersEnabled and myTeam == HNS_SEEKER_TEAM then
+        if performAttack(KNIFE_NAMES, HNS_HIDER_TEAM, knifeFastEnabled) then
+            lastAttack = now
+        end
+    elseif killSeekersEnabled and myTeam == HNS_HIDER_TEAM then
+        if performAttack(FIST_NAMES, HNS_SEEKER_TEAM, true) then
+            lastAttack = now
+        end
+    elseif knifeFastEnabled and myTeam == HNS_SEEKER_TEAM then
+        if performAttack(KNIFE_NAMES, nil, true) then
+            lastAttack = now
+        end
+    end
+end)
+
+local autoEscapeConnection
+local lastEscape = 0
+
+local function findEscapePart(root)
+    local container = workspace:FindFirstChild("Map") or workspace
+    local best
+    local shortest = math.huge
+    for _, descendant in container:GetDescendants() do
+        if descendant:IsA("BasePart") and nameMatches(descendant.Name, ESCAPE_NAMES) then
+            local model = descendant:FindFirstAncestorOfClass("Model")
+            if not (model and model:FindFirstChildOfClass("Humanoid")) then
+                local distance = (descendant.Position - root.Position).Magnitude
+                if distance < shortest then
+                    shortest = distance
+                    best = descendant
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function startAutoEscape()
+    if autoEscapeConnection then
+        return
+    end
+    autoEscapeConnection = RunService.Heartbeat:Connect(function()
+        if LocalPlayer:GetAttribute("HideNSeek_Team") ~= HNS_HIDER_TEAM or LocalPlayer:GetAttribute("Dead") then
+            return
+        end
+        local now = os.clock()
+        if now - lastEscape < 2 then
+            return
+        end
+        local character = LocalPlayer.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not root then
+            return
+        end
+        local exit = findEscapePart(root)
+        if exit then
+            root.CFrame = exit.CFrame + Vector3.new(0, 3, 0)
+            lastEscape = now
+        end
+    end)
+end
+
+local function stopAutoEscape()
+    if autoEscapeConnection then
+        autoEscapeConnection:Disconnect()
+        autoEscapeConnection = nil
+    end
+end
+
+local footstepsEnabled = false
+local footstepsPatched = false
+
+local function getHideNSeekClass()
+    local ok, result = pcall(function()
+        local playerScripts = LocalPlayer:WaitForChild("PlayerScripts")
+        return require(playerScripts.Client.GameHandler.GamemodeSystem.HideNSeek)
+    end)
+    if ok then
+        return result
+    end
+end
+
+local function setFootsteps(state)
+    footstepsEnabled = state
+    local class = getHideNSeekClass()
+    if not class then
+        return
+    end
+    if not footstepsPatched then
+        footstepsPatched = true
+        local baseHandle = class.handle
+        local baseDisable = class.disablePlayerFootsteps
+        class.handle = function(self)
+            baseHandle(self)
+            if footstepsEnabled then
+                self:enablePlayerFootsteps()
+            end
+        end
+        class.disablePlayerFootsteps = function(self)
+            if footstepsEnabled then
+                return
+            end
+            return baseDisable(self)
+        end
+    end
+    if state and getgc then
+        pcall(function()
+            for _, value in getgc(true) do
+                if type(value) == "table" and rawget(value, "footstepsMaid") and rawget(value, "map") then
+                    value:enablePlayerFootsteps()
+                    break
+                end
+            end
+        end)
+    end
+end
+
+local godEnabled = false
+local godConnection
+local spawnCFrame
+
+local function startGod()
+    if godConnection then
+        return
+    end
+    godEnabled = true
+    godConnection = RunService.Heartbeat:Connect(function()
+        local character = LocalPlayer.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then
+            return
+        end
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+        if humanoid.MaxHealth < 1e9 then
+            humanoid.MaxHealth = 1e9
+        end
+        if humanoid.Health < humanoid.MaxHealth then
+            humanoid.Health = humanoid.MaxHealth
+        end
+        if not character:FindFirstChildOfClass("ForceField") then
+            Instance.new("ForceField").Parent = character
+        end
+    end)
+end
+
+local function stopGod()
+    godEnabled = false
+    if godConnection then
+        godConnection:Disconnect()
+        godConnection = nil
+    end
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+        humanoid.MaxHealth = 100
+        humanoid.Health = 100
+    end
+    local forceField = character and character:FindFirstChildOfClass("ForceField")
+    if forceField then
+        forceField:Destroy()
+    end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+    local root = character:WaitForChild("HumanoidRootPart", 10)
+    if root then
+        task.wait(1)
+        spawnCFrame = root.CFrame
+    end
+end)
+
+if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+    spawnCFrame = LocalPlayer.Character.HumanoidRootPart.CFrame
+end
+
+local function findRlglPart(patterns)
+    local container = workspace:FindFirstChild("Map") or workspace
+    for _, descendant in container:GetDescendants() do
+        if descendant:IsA("BasePart") and nameMatches(descendant.Name, patterns) then
+            local model = descendant:FindFirstAncestorOfClass("Model")
+            if not (model and model:FindFirstChildOfClass("Humanoid")) then
+                return descendant
+            end
+        end
+    end
+end
+
+local function tpEnd()
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local part = findRlglPart({ "finish", "end", "goal", "meta", "final", "win" })
+    if root and part then
+        root.CFrame = part.CFrame + Vector3.new(0, 4, 0)
+    else
+        notify("Red Light Green Light", "No encontré la meta")
+    end
+end
+
+local function tpStart()
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local part = findRlglPart({ "start", "spawn", "inicio" })
+    if root and part then
+        root.CFrame = part.CFrame + Vector3.new(0, 4, 0)
+    elseif root and spawnCFrame then
+        root.CFrame = spawnCFrame
+    else
+        notify("Red Light Green Light", "No encontré el inicio")
+    end
+end
+
+local glassEnabled = false
+local glassFolder
+local glassConnection
+local glassOriginal = setmetatable({}, { __mode = "k" })
+local GLASS_SAFE = Color3.fromRGB(0, 255, 0)
+local GLASS_DEADLY = Color3.fromRGB(255, 0, 0)
+
+local function getGlassPass()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    return remotes and remotes:FindFirstChild("GlassPass")
+end
+
+local glassReplies = 0
+local glassDeadlyCount = 0
+
+local function markGlass(part)
+    if not part:IsA("BasePart") or not glassEnabled then
+        return
+    end
+    local remote = getGlassPass()
+    if not remote then
+        return
+    end
+    local ok, deadly = pcall(function()
+        return remote:InvokeServer(part.Name)
+    end)
+    if not ok or not glassEnabled or not part.Parent then
+        return
+    end
+    glassReplies += 1
+    if deadly then
+        glassDeadlyCount += 1
+        if not glassOriginal[part] then
+            glassOriginal[part] = { Color = part.Color, Transparency = part.Transparency }
+        end
+        part.Color = GLASS_DEADLY
+        part.Transparency = 0.45
+    end
+    if glassReplies == 20 and glassDeadlyCount == 0 then
+        notify("Glass", "El servidor no marca ninguno como mortal")
+    end
+end
+
+local function scanGlasses(folder)
+    for _, child in folder:GetChildren() do
+        task.spawn(markGlass, child)
+    end
+end
+
+local function stopGlassEsp()
+    glassEnabled = false
+    glassFolder = nil
+    if glassConnection then
+        glassConnection:Disconnect()
+        glassConnection = nil
+    end
+    for part, original in glassOriginal do
+        if part.Parent then
+            part.Color = original.Color
+            part.Transparency = original.Transparency
+        end
+    end
+    table.clear(glassOriginal)
+end
+
+local function startGlassEsp()
+    if glassEnabled then
+        return
+    end
+    glassEnabled = true
+    task.spawn(function()
+        while glassEnabled do
+            local map = workspace:FindFirstChild("Map")
+            local folder = map and map:FindFirstChild("Glasses", true)
+            if folder and folder ~= glassFolder then
+                glassFolder = folder
+                if glassConnection then
+                    glassConnection:Disconnect()
+                end
+                glassConnection = folder.ChildAdded:Connect(function(child)
+                    task.spawn(markGlass, child)
+                end)
+                scanGlasses(folder)
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+local bridgeEnabled = false
+local bridgeFolder
+local bridgeConnection
+local bridgeParts = {}
+
+local function addBridge(glass)
+    if not glass:IsA("BasePart") or bridgeParts[glass] then
+        return
+    end
+    local platform = Instance.new("Part")
+    platform.Name = "GlassBridge"
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.CanTouch = false
+    platform.CanQuery = false
+    platform.Transparency = 0.6
+    platform.Material = Enum.Material.SmoothPlastic
+    platform.Color = Color3.fromRGB(0, 170, 255)
+    platform.Size = Vector3.new(glass.Size.X, 0.4, glass.Size.Z)
+    platform.CFrame = glass.CFrame * CFrame.new(0, glass.Size.Y / 2 + 0.25, 0)
+    platform.Parent = workspace
+    bridgeParts[glass] = platform
+end
+
+local function stopBridge()
+    bridgeEnabled = false
+    bridgeFolder = nil
+    if bridgeConnection then
+        bridgeConnection:Disconnect()
+        bridgeConnection = nil
+    end
+    for _, platform in bridgeParts do
+        platform:Destroy()
+    end
+    table.clear(bridgeParts)
+end
+
+local function startBridge()
+    if bridgeEnabled then
+        return
+    end
+    bridgeEnabled = true
+    task.spawn(function()
+        while bridgeEnabled do
+            local map = workspace:FindFirstChild("Map")
+            local folder = map and map:FindFirstChild("Glasses", true)
+            if folder and folder ~= bridgeFolder then
+                bridgeFolder = folder
+                if bridgeConnection then
+                    bridgeConnection:Disconnect()
+                end
+                bridgeConnection = folder.ChildAdded:Connect(addBridge)
+                for _, child in folder:GetChildren() do
+                    addBridge(child)
+                end
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+local jumpRopeEnabled = false
+local jumpRopeFolder
+local jumpRopeConnection
+local jumpRopeOriginal = setmetatable({}, { __mode = "k" })
+
+local function disableRopePhysics(folder)
+    for _, descendant in folder:GetDescendants() do
+        if descendant:IsA("BasePart") then
+            if not jumpRopeOriginal[descendant] then
+                jumpRopeOriginal[descendant] = {
+                    CanCollide = descendant.CanCollide,
+                    CanTouch = descendant.CanTouch,
+                }
+            end
+            descendant.CanCollide = false
+            descendant.CanTouch = false
+        end
+    end
+end
+
+local function findRopeFolder()
+    local jumpRope = workspace:FindFirstChild("JumpRope", true)
+    local rope = jumpRope and jumpRope:FindFirstChild("Rope")
+    if rope then
+        return rope
+    end
+    for _, descendant in workspace:GetDescendants() do
+        if descendant.Name == "Rope" and descendant:FindFirstChild("3D") then
+            return descendant
+        end
+    end
+end
+
+local function stopJumpRope()
+    jumpRopeEnabled = false
+    jumpRopeFolder = nil
+    if jumpRopeConnection then
+        jumpRopeConnection:Disconnect()
+        jumpRopeConnection = nil
+    end
+    for part, original in jumpRopeOriginal do
+        if part.Parent then
+            part.CanCollide = original.CanCollide
+            part.CanTouch = original.CanTouch
+        end
+    end
+    table.clear(jumpRopeOriginal)
+end
+
+local function startJumpRope()
+    if jumpRopeEnabled then
+        return
+    end
+    jumpRopeEnabled = true
+    task.spawn(function()
+        while jumpRopeEnabled do
+            local folder = findRopeFolder()
+            if folder then
+                if folder ~= jumpRopeFolder then
+                    jumpRopeFolder = folder
+                    if jumpRopeConnection then
+                        jumpRopeConnection:Disconnect()
+                    end
+                    jumpRopeConnection = folder.ChildAdded:Connect(function(child)
+                        if jumpRopeEnabled and child.Name == "3D" then
+                            child:Destroy()
+                        end
+                    end)
+                end
+                local model = folder:FindFirstChild("3D")
+                if model then
+                    model:Destroy()
+                end
+                disableRopePhysics(folder)
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+local honeycombEnabled = false
+local honeycombRunning = false
+local honeycombBatch = 4
+local honeycombInterval = 0.2
+
+local function runHoneycomb(force)
+    if honeycombRunning then
+        return
+    end
+    honeycombRunning = true
+    local ok, err = pcall(function()
+        local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local gui = playerGui and playerGui:WaitForChild("Honeycomb", 10)
+        local shapeValue = gui and gui:WaitForChild("Shape", 10)
+        local connection = gui and gui:WaitForChild("Connection", 10)
+        if not shapeValue or not connection then
+            return
+        end
+        local cookie = shapeValue.Value
+        local path = cookie and cookie:FindFirstChild("Path")
+        if not path then
+            notify("Honeycomb", "No encontré la galleta")
+            return
+        end
+        task.wait(1)
+        local choose = gui:FindFirstChild("ChooseInputType")
+        while choose and choose.Parent and choose.Visible do
+            task.wait(0.2)
+        end
+        local pending = {}
+        for _, part in path:GetChildren() do
+            if part:IsA("BasePart") and not part:GetAttribute("Completed") then
+                table.insert(pending, part)
+            end
+        end
+        local index = 1
+        while (force or honeycombEnabled)
+            and LocalPlayer:GetAttribute("HONEYCOMB_START_CUTTING")
+            and index <= #pending
+        do
+            local batch = {}
+            for i = index, math.min(index + honeycombBatch - 1, #pending) do
+                table.insert(batch, pending[i])
+            end
+            connection:FireServer(batch)
+            for _, part in batch do
+                part.Transparency = 0
+            end
+            index += honeycombBatch
+            task.wait(honeycombInterval)
+        end
+        if index > #pending then
+            notify("Honeycomb", "Puntos enviados")
+        end
+    end)
+    honeycombRunning = false
+    if not ok then
+        warn(err)
+    end
+end
+
+LocalPlayer:GetAttributeChangedSignal("HONEYCOMB_START_CUTTING"):Connect(function()
+    if honeycombEnabled and LocalPlayer:GetAttribute("HONEYCOMB_START_CUTTING") then
+        task.spawn(runHoneycomb, false)
+    end
+end)
+
+local function getPlayerNames()
+    local names = {}
+    for _, player in Players:GetPlayers() do
+        if player ~= LocalPlayer then
+            table.insert(names, player.Name)
+        end
+    end
+    return names
+end
+
+local selectedPlayerName
+
+local Window = WindUI:CreateWindow({
+    Title = "Squid Game X Núcleo Blog Script",
+    Icon = "swords",
+    Author = "Squid Game X Núcleo Blog",
+    Folder = "SquidGameXNucleo",
+    Theme = "Dark",
+})
+
+local CombatTab = Window:Tab({
+    Title = "Combate",
+    Icon = "swords",
+})
+
+local HitboxSection = CombatTab:Section({
+    Title = "Hitbox",
+    Icon = "box",
+})
+
+HitboxSection:Input({
+    Title = "Tamaño",
+    Desc = "Tamaño de la hitbox",
+    Flag = "HitboxSize",
+    Placeholder = "Ej: 12",
+    Callback = function(text)
+        local value = tonumber(text)
+        if value and value > 0 then
+            size = math.clamp(value, 1, 500)
+            refresh()
+        end
+    end,
+})
+
+HitboxSection:Slider({
+    Title = "Transparencia",
+    Flag = "HitboxTransparency",
+    Step = 0.05,
+    Value = { Min = 0, Max = 1, Default = 0.9 },
+    Callback = function(value)
+        hitboxTransparency = value
+        refresh()
+    end,
+})
+
+HitboxSection:Colorpicker({
+    Title = "Color de la hitbox",
+    Flag = "HitboxColor",
+    Default = Color3.fromRGB(255, 0, 0),
+    Callback = function(color)
+        hitboxColor = color
+        refresh()
+    end,
+})
+
+HitboxSection:Toggle({
+    Title = "Hitbox",
+    Desc = "ON / OFF",
+    Flag = "HitboxToggle",
+    Value = false,
+    Callback = function(state)
+        enabled = state
+        refresh()
+    end,
+})
+
+local WeaponsSection = CombatTab:Section({
+    Title = "Armas",
+    Icon = "crosshair",
+})
+
+WeaponsSection:Toggle({
+    Title = "AimGun",
+    Desc = "Las balas van al equipo contrario según tu rol",
+    Flag = "AimGunToggle",
+    Value = false,
+    Callback = function(state)
+        setAimGun(state)
+    end,
+})
+
+WeaponsSection:Toggle({
+    Title = "Balas atraviesan",
+    Desc = "Ignora paredes y jugadores que no son objetivo",
+    Flag = "PassThroughToggle",
+    Value = false,
+    Callback = function(state)
+        passThrough = state
+        patchBullets()
+    end,
+})
+
+WeaponsSection:Toggle({
+    Title = "Munición infinita (todas las armas)",
+    Desc = "CurrentAmmo y Ammo = 999 en cada arma",
+    Flag = "InfiniteAmmoToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startAmmo()
+        else
+            stopAmmo()
+        end
+    end,
+})
+
+local ModsSection = CombatTab:Section({
+    Title = "Modificadores de armas",
+    Icon = "zap",
+})
+
+ModsSection:Slider({
+    Title = "Velocidad de bala",
+    Flag = "BulletSpeed",
+    Step = 500,
+    Value = { Min = 1000, Max = 20000, Default = 5000 },
+    Callback = function(value)
+        bulletSpeedValue = value
+    end,
+})
+
+ModsSection:Toggle({
+    Title = "Balas rápidas",
+    Desc = "Aumenta BulletSpeed",
+    Flag = "FastBulletsToggle",
+    Value = false,
+    Callback = function(state)
+        fastBullets = state
+        patchBullets()
+    end,
+})
+
+ModsSection:Slider({
+    Title = "Cooldown de disparo",
+    Desc = "Segundos entre disparos",
+    Flag = "FireCooldown",
+    Step = 0.01,
+    Value = { Min = 0.01, Max = 0.5, Default = 0.05 },
+    Callback = function(value)
+        fireCooldownValue = value
+    end,
+})
+
+ModsSection:Toggle({
+    Title = "Cadencia rápida",
+    Desc = "Dispara más rápido y en automático",
+    Flag = "FastFireToggle",
+    Value = false,
+    Callback = function(state)
+        fastFire = state
+        patchBullets()
+    end,
+})
+
+ModsSection:Slider({
+    Title = "Multiplicador de daño",
+    Flag = "DamageMultiplier",
+    Step = 1,
+    Value = { Min = 1, Max = 20, Default = 2 },
+    Callback = function(value)
+        damageMultiplier = math.floor(value)
+    end,
+})
+
+ModsSection:Toggle({
+    Title = "Daño aumentado",
+    Desc = "Multiplica HitDamage y repite el impacto",
+    Flag = "DamageToggle",
+    Value = false,
+    Callback = function(state)
+        damageEnabled = state
+        patchBullets()
+    end,
+})
+
+ModsSection:Toggle({
+    Title = "No Recoil",
+    Desc = "Quita el retroceso de las armas",
+    Flag = "NoRecoilToggle",
+    Value = false,
+    Callback = function(state)
+        noRecoil = state
+        patchBullets()
+    end,
+})
+
+local PlayerTab = Window:Tab({
+    Title = "Jugador",
+    Icon = "user",
+})
+
+local MovementSection = PlayerTab:Section({
+    Title = "Movimiento",
+    Icon = "wind",
+})
+
+MovementSection:Input({
+    Title = "Velocidad",
+    Desc = "Valor de WalkSpeed",
+    Flag = "SpeedValue",
+    Placeholder = "Ej: 50",
+    Callback = function(text)
+        local value = tonumber(text)
+        if value and value > 0 then
+            speedValue = math.clamp(value, 1, 500)
+        end
+    end,
+})
+
+MovementSection:Toggle({
+    Title = "Speed",
+    Desc = "ON / OFF",
+    Flag = "SpeedToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startSpeed()
+        else
+            stopSpeed()
+        end
+    end,
+})
+
+MovementSection:Toggle({
+    Title = "Infinite Jump",
+    Desc = "Saltar infinitamente en el aire",
+    Flag = "InfiniteJumpToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startInfiniteJump()
+        else
+            stopInfiniteJump()
+        end
+    end,
+})
+
+MovementSection:Slider({
+    Title = "Velocidad de vuelo",
+    Flag = "FlySpeed",
+    Step = 5,
+    Value = { Min = 10, Max = 300, Default = 60 },
+    Callback = function(value)
+        flySpeed = value
+    end,
+})
+
+MovementSection:Toggle({
+    Title = "Fly",
+    Desc = "WASD + Espacio / Shift",
+    Flag = "FlyToggle",
+    Value = false,
+    Callback = function(state)
+        flyEnabled = state
+        if state then
+            startFly()
+        else
+            stopFly()
+        end
+    end,
+})
+
+MovementSection:Toggle({
+    Title = "Noclip",
+    Desc = "Atravesar paredes",
+    Flag = "NoclipToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startNoclip()
+        else
+            stopNoclip()
+        end
+    end,
+})
+
+local ProtectionSection = PlayerTab:Section({
+    Title = "Protección",
+    Icon = "shield",
+})
+
+ProtectionSection:Toggle({
+    Title = "Anti Ragdoll",
+    Desc = "ON / OFF",
+    Flag = "AntiRagdollToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startAntiRagdoll()
+        else
+            stopAntiRagdoll()
+        end
+    end,
+})
+
+local VisualsTab = Window:Tab({
+    Title = "Visuales",
+    Icon = "eye",
+})
+
+local EspSection = VisualsTab:Section({
+    Title = "ESP",
+    Icon = "scan-eye",
+})
+
+EspSection:Toggle({
+    Title = "ESP Highlight",
+    Desc = "Resalta jugadores a través de paredes",
+    Flag = "EspHighlight",
+    Value = false,
+    Callback = function(state)
+        espHighlightEnabled = state
+    end,
+})
+
+EspSection:Toggle({
+    Title = "ESP Nombres y distancia",
+    Desc = "Nombre y distancia sobre cada jugador",
+    Flag = "EspNames",
+    Value = false,
+    Callback = function(state)
+        espNamesEnabled = state
+    end,
+})
+
+EspSection:Toggle({
+    Title = "ESP Líneas (Tracers)",
+    Desc = "Líneas hacia cada jugador",
+    Flag = "EspTracers",
+    Value = false,
+    Callback = function(state)
+        espTracersEnabled = state
+    end,
+})
+
+local GamesTab = Window:Tab({
+    Title = "Games",
+    Icon = "gamepad-2",
+})
+
+local SeekerSection = GamesTab:Section({
+    Title = "Hide And Seek - Seeker Options",
+    Icon = "swords",
+})
+
+SeekerSection:Toggle({
+    Title = "Kill Hiders",
+    Desc = "Siendo Seeker, va al Hider más cercano y lo ataca",
+    Flag = "HnsKillHiders",
+    Value = false,
+    Callback = function(state)
+        killHidersEnabled = state
+    end,
+})
+
+SeekerSection:Toggle({
+    Title = "Knife Fast",
+    Desc = "El cuchillo ataca más rápido",
+    Flag = "HnsKnifeFast",
+    Value = false,
+    Callback = function(state)
+        knifeFastEnabled = state
+        if not state and not killSeekersEnabled then
+            restoreCooldowns()
+        end
+    end,
+})
+
+local HidersSection = GamesTab:Section({
+    Title = "Hide And Seek - Hiders",
+    Icon = "door-open",
+})
+
+HidersSection:Toggle({
+    Title = "Auto Escape",
+    Desc = "Teletransporta a la salida automáticamente",
+    Flag = "HnsAutoEscape",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startAutoEscape()
+        else
+            stopAutoEscape()
+        end
+    end,
+})
+
+HidersSection:Toggle({
+    Title = "Kill Seekers",
+    Desc = "Siendo Hider, golpea rápido a los Seekers con los puños",
+    Flag = "HnsKillSeekers",
+    Value = false,
+    Callback = function(state)
+        killSeekersEnabled = state
+        if not state and not knifeFastEnabled then
+            restoreCooldowns()
+        end
+    end,
+})
+
+local HnsGeneralSection = GamesTab:Section({
+    Title = "Hide And Seek - General",
+    Icon = "footprints",
+})
+
+HnsGeneralSection:Slider({
+    Title = "Intervalo de ataque",
+    Desc = "Segundos entre golpes",
+    Flag = "HnsAttackInterval",
+    Step = 0.01,
+    Value = { Min = 0.02, Max = 1, Default = 0.1 },
+    Callback = function(value)
+        attackInterval = value
+    end,
+})
+
+HnsGeneralSection:Toggle({
+    Title = "Mostrar huellas siempre",
+    Desc = "Mantiene visibles las huellas de los jugadores",
+    Flag = "HnsFootsteps",
+    Value = false,
+    Callback = function(state)
+        setFootsteps(state)
+    end,
+})
+
+local RlglSection = GamesTab:Section({
+    Title = "Red Light Green Light",
+    Icon = "traffic-cone",
+})
+
+RlglSection:Button({
+    Title = "Tp End",
+    Callback = tpEnd,
+})
+
+RlglSection:Button({
+    Title = "Tp Start",
+    Callback = tpStart,
+})
+
+RlglSection:Toggle({
+    Title = "God Mode",
+    Desc = "Evita morir y que te bajen vida",
+    Flag = "RlglGodMode",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startGod()
+        else
+            stopGod()
+        end
+    end,
+})
+
+local GlassSection = GamesTab:Section({
+    Title = "Glass",
+    Icon = "square",
+})
+
+GlassSection:Toggle({
+    Title = "Ver cristales",
+    Desc = "Verde = seguro, rojo = mortal",
+    Flag = "GlassEspToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startGlassEsp()
+        else
+            stopGlassEsp()
+        end
+    end,
+})
+
+GlassSection:Toggle({
+    Title = "Puente de cristales",
+    Desc = "Plataforma local sobre cada cristal para no caer",
+    Flag = "GlassBridgeToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startBridge()
+        else
+            stopBridge()
+        end
+    end,
+})
+
+local JumpRopeSection = GamesTab:Section({
+    Title = "Jump Rope",
+    Icon = "activity",
+})
+
+JumpRopeSection:Toggle({
+    Title = "Eliminar cuerda",
+    Desc = "Elimina el modelo 3D de la carpeta JumpRope",
+    Flag = "JumpRopeRemoveToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startJumpRope()
+        else
+            stopJumpRope()
+        end
+    end,
+})
+
+local HoneycombSection = GamesTab:Section({
+    Title = "Honeycomb",
+    Icon = "hexagon",
+})
+
+HoneycombSection:Toggle({
+    Title = "Auto completar galleta",
+    Desc = "Al empezar a tallar, envía los puntos del contorno al servidor",
+    Flag = "HoneycombAutoToggle",
+    Value = false,
+    Callback = function(state)
+        honeycombEnabled = state
+        if state and LocalPlayer:GetAttribute("HONEYCOMB_START_CUTTING") then
+            task.spawn(runHoneycomb, false)
+        end
+    end,
+})
+
+HoneycombSection:Slider({
+    Title = "Partes por envío",
+    Desc = "Más bajo = más parecido a jugar normal",
+    Flag = "HoneycombBatch",
+    Step = 1,
+    Value = { Min = 1, Max = 20, Default = 4 },
+    Callback = function(value)
+        honeycombBatch = math.floor(value)
+    end,
+})
+
+HoneycombSection:Slider({
+    Title = "Intervalo de envío",
+    Desc = "Segundos entre envíos",
+    Flag = "HoneycombInterval",
+    Step = 0.05,
+    Value = { Min = 0.1, Max = 1, Default = 0.2 },
+    Callback = function(value)
+        honeycombInterval = value
+    end,
+})
+
+HoneycombSection:Button({
+    Title = "Completar ahora",
+    Callback = function()
+        task.spawn(runHoneycomb, true)
+    end,
+})
+
+local LightsOutSection = GamesTab:Section({
+    Title = "Lights Out",
+    Icon = "lightbulb-off",
+})
+
+LightsOutSection:Toggle({
+    Title = "Empuje más fuerte",
+    Desc = "Multiplica la fuerza de la tool Push para que los jugadores salgan más lejos",
+    Flag = "LightsOutPushToggle",
+    Value = false,
+    Callback = function(state)
+        pushBoostEnabled = state
+        if state then
+            applyPush()
+        else
+            restorePush()
+        end
+    end,
+})
+
+LightsOutSection:Slider({
+    Title = "Multiplicador de empuje",
+    Desc = "Veces que se multiplica la fuerza original",
+    Flag = "LightsOutPushMultiplier",
+    Step = 0.5,
+    Value = { Min = 1, Max = 20, Default = 3 },
+    Callback = function(value)
+        pushMultiplier = value
+        if pushBoostEnabled then
+            restorePush()
+            applyPush()
+        end
+    end,
+})
+
+LightsOutSection:Button({
+    Title = "Inspeccionar tool Push",
+    Callback = dumpPushTool,
+})
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if pushBoostEnabled then
+            applyPush()
+        end
+    end
+end)
+
+local ExtrasTab = Window:Tab({
+    Title = "Extras",
+    Icon = "layers",
+})
+
+local ShopSection = ExtrasTab:Section({
+    Title = "Tienda",
+    Icon = "shopping-bag",
+})
+
+ShopSection:Toggle({
+    Title = "Todas las skins (visual)",
+    Desc = "Muestra todas como Owned en la tienda",
+    Flag = "AllSkinsOwnedToggle",
+    Value = false,
+    Callback = function(state)
+        setAllSkinsOwned(state)
+    end,
+})
+
+local InteractSection = ExtrasTab:Section({
+    Title = "Interacción",
+    Icon = "hand",
+})
+
+InteractSection:Toggle({
+    Title = "Instant Interact",
+    Desc = "Quita el tiempo de mantener presionado",
+    Flag = "InstantInteractToggle",
+    Value = false,
+    Callback = function(state)
+        if state then
+            startInstantInteract()
+        else
+            stopInstantInteract()
+        end
+    end,
+})
+
+local TeleportSection = ExtrasTab:Section({
+    Title = "Teletransporte",
+    Icon = "map-pin",
+})
+
+local PlayerDropdown = TeleportSection:Dropdown({
+    Title = "Jugadores",
+    Values = getPlayerNames(),
+    Callback = function(selected)
+        selectedPlayerName = selected
+    end,
+})
+
+TeleportSection:Button({
+    Title = "Actualizar lista",
+    Callback = function()
+        pcall(function()
+            PlayerDropdown:Refresh(getPlayerNames())
+        end)
+    end,
+})
+
+TeleportSection:Button({
+    Title = "Teletransportar al jugador",
+    Callback = function()
+        local target = selectedPlayerName and Players:FindFirstChild(selectedPlayerName)
+        local targetRoot = target and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if targetRoot and root then
+            root.CFrame = targetRoot.CFrame * CFrame.new(0, 0, 3)
+        end
+    end,
+})
+
+local ConfigTab = Window:Tab({
+    Title = "Config",
+    Icon = "settings",
+})
+
+local ConfigSection = ConfigTab:Section({
+    Title = "Configuración",
+    Icon = "save",
+})
+
+ConfigSection:Button({
+    Title = "Guardar configuración",
+    Callback = function()
+        Window.ConfigManager:Config("default"):Save()
+    end,
+})
+
+ConfigSection:Button({
+    Title = "Cargar configuración",
+    Callback = function()
+        Window.ConfigManager:Config("default"):Load()
+    end,
+})
+
+pcall(function()
+    Window.ConfigManager:Config("default"):Load()
+end)
