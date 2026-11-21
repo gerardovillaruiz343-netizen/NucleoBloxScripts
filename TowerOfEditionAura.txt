@@ -566,6 +566,128 @@ addSaved(SlapsTab, "Toggle", "SlapAura", {
 	end,
 })
 
+local AutoEquipSlap = false
+local AutoEquipName = nil
+local NoSlapLabel = "(ninguna)"
+local SlapDropdown = nil
+local LastSlapList = ""
+
+local function isSlapTool(obj)
+	return obj:IsA("Tool") and (CollectionService:HasTag(obj, "Slap") or obj:FindFirstChild("SlapHandler") ~= nil)
+end
+
+local function getSlapNames()
+	local names, seen = {}, {}
+	local function scan(container)
+		if not container then
+			return
+		end
+		for _, obj in ipairs(container:GetChildren()) do
+			if isSlapTool(obj) and not seen[obj.Name] then
+				seen[obj.Name] = true
+				table.insert(names, obj.Name)
+			end
+		end
+	end
+	scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	scan(LocalPlayer.Character)
+	table.sort(names)
+	if #names == 0 then
+		names = { NoSlapLabel }
+	end
+	return names
+end
+
+local function refreshSlapDropdown()
+	local names = getSlapNames()
+	local key = table.concat(names, "|")
+	if key == LastSlapList or not SlapDropdown then
+		return
+	end
+	LastSlapList = key
+	local previous = AutoEquipName
+	pcall(function()
+		SlapDropdown:Refresh(names)
+	end)
+	if previous and table.find(names, previous) then
+		AutoEquipName = previous
+		pcall(function()
+			SlapDropdown:Select(previous)
+		end)
+	elseif previous then
+		AutoEquipName = previous
+	elseif names[1] ~= NoSlapLabel then
+		AutoEquipName = names[1]
+		pcall(function()
+			SlapDropdown:Select(names[1])
+		end)
+	end
+end
+
+local function autoEquipStep()
+	local character = LocalPlayer.Character
+	local hum = getHumanoid(character)
+	if not hum or hum.Health <= 0 or not AutoEquipName or AutoEquipName == NoSlapLabel then
+		return
+	end
+	if character:FindFirstChildOfClass("Tool") then
+		return
+	end
+	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+	local tool = backpack and backpack:FindFirstChild(AutoEquipName)
+	if tool and tool:IsA("Tool") then
+		hum:EquipTool(tool)
+	end
+end
+
+task.spawn(function()
+	while true do
+		pcall(refreshSlapDropdown)
+		if AutoEquipSlap then
+			pcall(autoEquipStep)
+		end
+		task.wait(0.2)
+	end
+end)
+
+addSaved(SlapsTab, "Toggle", "AutoEquipSlap", {
+	Title = "Auto-equip-Slap",
+	Desc = "Si se desequipa la Slap se vuelve a equipar sola",
+	Value = false,
+	Callback = function(state)
+		AutoEquipSlap = state
+		if state then
+			if not AutoEquipName or AutoEquipName == NoSlapLabel then
+				notify("Auto-equip-Slap", "Elige una Slap en el selector de abajo")
+			else
+				pcall(autoEquipStep)
+			end
+		end
+	end,
+})
+
+do
+	local names = getSlapNames()
+	LastSlapList = table.concat(names, "|")
+	SlapDropdown = addSaved(SlapsTab, "Dropdown", "AutoEquipSlapName", {
+		Title = "Slap a equipar",
+		Values = names,
+		Value = names[1],
+		Callback = function(option)
+			local name = typeof(option) == "table" and option.Title or option
+			if name and name ~= NoSlapLabel then
+				AutoEquipName = name
+			end
+			if AutoEquipSlap then
+				pcall(autoEquipStep)
+			end
+		end,
+	})
+	if names[1] ~= NoSlapLabel then
+		AutoEquipName = names[1]
+	end
+end
+
 local AntiRagdoll = false
 local LastSafeCFrame = nil
 local LockUntil = 0
