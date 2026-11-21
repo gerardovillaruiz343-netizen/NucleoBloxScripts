@@ -1,0 +1,2251 @@
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+local CollectionService = game:GetService("CollectionService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local ConfigFolder = "NucleoBlox"
+local ConfigPath = ConfigFolder .. "/AuraSlap_Config.json"
+local ConfigState = {}
+local ConfigEntries = {}
+local ConfigOrder = {}
+
+local function normalizeConfigValue(kind, value)
+	if kind == "Dropdown" and typeof(value) == "table" then
+		return value.Title or value[1]
+	end
+	if kind == "Keybind" and typeof(value) == "EnumItem" then
+		return value.Name
+	end
+	return value
+end
+
+local function addSaved(tab, method, key, opts)
+	local original = opts.Callback
+	opts.Callback = function(value)
+		ConfigState[key] = normalizeConfigValue(method, value)
+		return original(value)
+	end
+	ConfigState[key] = normalizeConfigValue(method, opts.Value)
+	local element = tab[method](tab, opts)
+	ConfigEntries[key] = { Kind = method, Element = element, Callback = opts.Callback }
+	table.insert(ConfigOrder, key)
+	return element
+end
+
+local Fonts = {
+	["Gotham SSm"] = "rbxasset://fonts/families/GothamSSm.json",
+	["Inter"] = "rbxassetid://12187365364",
+	["Montserrat"] = "rbxasset://fonts/families/Montserrat.json",
+	["Roboto"] = "rbxasset://fonts/families/Roboto.json",
+	["Ubuntu"] = "rbxasset://fonts/families/Ubuntu.json",
+	["Builder Sans"] = "rbxasset://fonts/families/BuilderSans.json",
+	["Source Sans Pro"] = "rbxasset://fonts/families/SourceSansPro.json",
+	["Nunito"] = "rbxasset://fonts/families/Nunito.json",
+	["Oswald"] = "rbxasset://fonts/families/Oswald.json",
+	["Fredoka One"] = "rbxasset://fonts/families/FredokaOne.json",
+	["Arial"] = "rbxasset://fonts/families/Arial.json",
+}
+local FontNames = {}
+for name in pairs(Fonts) do
+	table.insert(FontNames, name)
+end
+table.sort(FontNames)
+
+pcall(function()
+	WindUI:SetFont(Fonts["Gotham SSm"])
+end)
+
+local Window = WindUI:CreateWindow({
+	Title = "Núcleo Blox",
+	Icon = "sparkles",
+	Author = "Torre de edición de Aura",
+	Folder = "NucleoBlox",
+	Size = UDim2.fromOffset(580, 460),
+	Theme = "Dark",
+	Transparent = false,
+	Resizable = true,
+	SideBarWidth = 200,
+	HideSearchBar = true,
+	ToggleKey = Enum.KeyCode.RightControl,
+	User = {
+		Enabled = true,
+		Anonymous = false,
+	},
+	OpenButton = {
+		Title = "Núcleo Blox",
+		CornerRadius = UDim.new(1, 0),
+		StrokeThickness = 0,
+		Enabled = true,
+		Draggable = true,
+		OnlyMobile = false,
+		Scale = 1,
+		Color = ColorSequence.new(Color3.new(0, 0, 0), Color3.new(0, 0, 0)),
+	},
+})
+
+task.defer(function()
+	pcall(function()
+		local button = Window.OpenButtonMain.Button
+		button.BackgroundColor3 = Color3.new(0, 0, 0)
+		button.BackgroundTransparency = 0.4
+		local stroke = button:FindFirstChildOfClass("UIStroke")
+		if stroke then
+			stroke.Enabled = false
+			stroke.Thickness = 0
+		end
+		for _, obj in ipairs(button:GetDescendants()) do
+			if obj:IsA("TextLabel") then
+				obj.TextColor3 = Color3.new(1, 1, 1)
+			elseif obj:IsA("ImageLabel") then
+				obj.ImageColor3 = Color3.new(1, 1, 1)
+			elseif obj:IsA("UIStroke") then
+				obj.Enabled = false
+			end
+		end
+	end)
+end)
+
+local function notify(title, content)
+	pcall(function()
+		WindUI:Notify({
+			Title = title,
+			Content = content,
+			Icon = "info",
+			Duration = 3,
+		})
+	end)
+end
+
+local function getRoot(character)
+	return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHumanoid(character)
+	return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+local HitboxTab = Window:Tab({ Title = "HitBox Expander", Icon = "crosshair" })
+local SlapsTab = Window:Tab({ Title = "Slaps", Icon = "hand" })
+local PlayerTab = Window:Tab({ Title = "Player", Icon = "user" })
+local EspTab = Window:Tab({ Title = "ESP", Icon = "eye" })
+local AuraTab = Window:Tab({ Title = "Aura", Icon = "sparkles" })
+local ShadersTab = Window:Tab({ Title = "Shaders", Icon = "sun" })
+local SkinsTab = Window:Tab({ Title = "Skins", Icon = "shirt" })
+local ConfigTab = Window:Tab({ Title = "Configuración", Icon = "settings" })
+local InfoTab = Window:Tab({ Title = "Información", Icon = "info" })
+
+local HitboxEnabled = false
+local SlapAura = false
+local AntiCooldown = false
+local HitboxSize = 10
+local HitboxVisible = true
+local HitboxAdornments = {}
+local SlapRemote = nil
+local Redirecting = false
+
+task.spawn(function()
+	local remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
+	if remotes then
+		SlapRemote = remotes:WaitForChild("Slap", 15)
+	end
+end)
+
+local AdornParent = nil
+pcall(function()
+	AdornParent = gethui and gethui() or game:GetService("CoreGui")
+end)
+if not AdornParent then
+	AdornParent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local function clearHitboxVisuals()
+	for root, box in pairs(HitboxAdornments) do
+		pcall(box.Destroy, box)
+		HitboxAdornments[root] = nil
+	end
+end
+
+local function updateHitboxVisuals()
+	local size = Vector3.new(HitboxSize, HitboxSize, HitboxSize)
+	local alive = {}
+	if HitboxVisible then
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LocalPlayer then
+				local root = getRoot(plr.Character)
+				local hum = getHumanoid(plr.Character)
+				if root and hum and hum.Health > 0 then
+					alive[root] = true
+					local box = HitboxAdornments[root]
+					if not box or not box.Parent then
+						box = Instance.new("BoxHandleAdornment")
+						box.Name = "NB_Hitbox"
+						box.AlwaysOnTop = false
+						box.ZIndex = 1
+						box.Color3 = Color3.fromRGB(255, 60, 60)
+						box.Transparency = 0.75
+						box.Adornee = root
+						box.Parent = AdornParent
+						HitboxAdornments[root] = box
+					end
+					box.Size = size
+				end
+			end
+		end
+	end
+	for root, box in pairs(HitboxAdornments) do
+		if not alive[root] then
+			pcall(box.Destroy, box)
+			HitboxAdornments[root] = nil
+		end
+	end
+end
+
+local function findHitboxTarget(myPos)
+	local bestRoot, bestDist = nil, math.huge
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer then
+			local root = getRoot(plr.Character)
+			local hum = getHumanoid(plr.Character)
+			if root and hum and hum.Health > 0 then
+				local dist = (root.Position - myPos).Magnitude
+				if dist <= HitboxSize and dist < bestDist then
+					bestRoot, bestDist = root, dist
+				end
+			end
+		end
+	end
+	return bestRoot, bestDist
+end
+
+local function slapCFrameFor(targetRoot, fromPos)
+	local targetPos = targetRoot.Position
+	local flat = Vector3.new(targetPos.X - fromPos.X, 0, targetPos.Z - fromPos.Z)
+	if flat.Magnitude < 0.01 then
+		flat = -targetRoot.CFrame.LookVector
+	end
+	local origin = targetPos - flat.Unit * 2.5
+	return CFrame.lookAt(origin, Vector3.new(targetPos.X, origin.Y, targetPos.Z))
+end
+
+local function redirectSlap(remote, toolName, targetRoot)
+	local root = getRoot(LocalPlayer.Character)
+	if not root or not targetRoot.Parent then
+		return
+	end
+	local home = root.CFrame
+	local slapCFrame = slapCFrameFor(targetRoot, home.Position)
+	Redirecting = true
+	pcall(function()
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = slapCFrame
+	end)
+	RunService.Heartbeat:Wait()
+	RunService.Heartbeat:Wait()
+	if targetRoot.Parent then
+		slapCFrame = slapCFrameFor(targetRoot, home.Position)
+		pcall(function()
+			root.CFrame = slapCFrame
+		end)
+	end
+	pcall(function()
+		remote:FireServer("MARKER", slapCFrame, toolName)
+	end)
+	Redirecting = false
+	task.wait(0.08)
+	pcall(function()
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = home
+	end)
+end
+
+if hookmetamethod and getnamecallmethod then
+	local wrap = newcclosure or function(f)
+		return f
+	end
+	local oldNamecall
+	oldNamecall = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+		if (HitboxEnabled or SlapAura) and not Redirecting and SlapRemote and self == SlapRemote and getnamecallmethod() == "FireServer" then
+			local mode, sentCFrame, toolName = ...
+			if mode == "MARKER" and typeof(sentCFrame) == "CFrame" then
+				local ok, target, dist = pcall(findHitboxTarget, sentCFrame.Position)
+				if ok and target and dist > 4 then
+					task.spawn(redirectSlap, self, toolName, target)
+					return nil
+				end
+			end
+		end
+		return oldNamecall(self, ...)
+	end))
+end
+
+task.spawn(function()
+	while true do
+		if HitboxEnabled then
+			pcall(updateHitboxVisuals)
+		end
+		task.wait(0.25)
+	end
+end)
+
+addSaved(HitboxTab, "Input", "HitboxSize", {
+	Title = "Hitbox",
+	Placeholder = "Ingresa la hitbox…",
+	Value = "",
+	Callback = function(text)
+		local value = tonumber(text)
+		if value then
+			HitboxSize = math.clamp(value, 1, 60)
+			if HitboxEnabled then
+				pcall(updateHitboxVisuals)
+			end
+		end
+	end,
+})
+
+addSaved(HitboxTab, "Toggle", "HitboxEnabled", {
+	Title = "Hitbox Expander",
+	Desc = "Pega a jugadores dentro del rango de la hitbox",
+	Value = false,
+	Callback = function(state)
+		HitboxEnabled = state
+		if state then
+			if not (hookmetamethod and getnamecallmethod) then
+				notify("Hitbox", "Tu executor no soporta hookmetamethod")
+			end
+			pcall(updateHitboxVisuals)
+		else
+			clearHitboxVisuals()
+		end
+	end,
+})
+
+addSaved(HitboxTab, "Toggle", "HitboxVisible", {
+	Title = "Mostrar Hitbox",
+	Desc = "Dibuja la caja de la hitbox (no mueve a nadie)",
+	Value = true,
+	Callback = function(state)
+		HitboxVisible = state
+		if HitboxEnabled then
+			pcall(updateHitboxVisuals)
+		end
+	end,
+})
+
+local function getToolGivers()
+	local list, seen = {}, {}
+	local function add(obj)
+		if obj and not seen[obj] and (obj:IsA("Model") or obj:IsA("BasePart")) then
+			seen[obj] = true
+			table.insert(list, obj)
+		end
+	end
+	local folder = Workspace:FindFirstChild("Givers")
+	if folder then
+		for _, child in ipairs(folder:GetChildren()) do
+			if child.Name == "ToolGiver" then
+				add(child)
+			end
+		end
+	end
+	for _, tagged in ipairs(CollectionService:GetTagged("ToolGiver")) do
+		if tagged:IsDescendantOf(Workspace) then
+			add(tagged)
+		end
+	end
+	return list
+end
+
+local function getTouchParts(giver)
+	local parts = {}
+	local candidates = giver:GetDescendants()
+	table.insert(candidates, giver)
+	for _, obj in ipairs(candidates) do
+		if obj:IsA("TouchTransmitter") and obj.Parent and obj.Parent:IsA("BasePart") then
+			table.insert(parts, obj.Parent)
+		end
+	end
+	return parts
+end
+
+local function getPrompts(giver)
+	local prompts = {}
+	for _, obj in ipairs(giver:GetDescendants()) do
+		if obj:IsA("ProximityPrompt") and obj.Enabled then
+			table.insert(prompts, obj)
+		end
+	end
+	return prompts
+end
+
+local function countTools()
+	local names = {}
+	local function scan(container)
+		if not container then
+			return
+		end
+		for _, obj in ipairs(container:GetChildren()) do
+			if obj:IsA("Tool") then
+				names[obj.Name] = true
+			end
+		end
+	end
+	scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	scan(LocalPlayer.Character)
+	return names
+end
+
+local GivingTools = false
+
+local function giveAllTools()
+	if GivingTools then
+		return
+	end
+	local root = getRoot(LocalPlayer.Character)
+	if not root then
+		notify("Slaps", "Tu personaje no está cargado")
+		return
+	end
+	local givers = getToolGivers()
+	if #givers == 0 then
+		notify("Slaps", "No se encontró ningún ToolGiver en el mapa")
+		return
+	end
+	GivingTools = true
+	local before = countTools()
+	local originalCFrame = root.CFrame
+	local canTouch = typeof(firetouchinterest) == "function"
+	for _, giver in ipairs(givers) do
+		for _, part in ipairs(getTouchParts(giver)) do
+			root = getRoot(LocalPlayer.Character)
+			if not root then
+				break
+			end
+			if canTouch then
+				pcall(firetouchinterest, root, part, 0)
+				task.wait()
+				pcall(firetouchinterest, root, part, 1)
+			else
+				pcall(function()
+					root.AssemblyLinearVelocity = Vector3.zero
+					root.CFrame = part.CFrame
+				end)
+				task.wait(0.25)
+			end
+		end
+		if typeof(fireproximityprompt) == "function" then
+			for _, prompt in ipairs(getPrompts(giver)) do
+				pcall(fireproximityprompt, prompt)
+			end
+		end
+		task.wait(0.05)
+	end
+	root = getRoot(LocalPlayer.Character)
+	if root and not canTouch then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = originalCFrame
+	end
+	task.wait(1)
+	local gained = {}
+	for name in pairs(countTools()) do
+		if not before[name] then
+			table.insert(gained, name)
+		end
+	end
+	GivingTools = false
+	if #gained > 0 then
+		notify("Slaps", "Tools nuevas (" .. #gained .. "): " .. table.concat(gained, ", "))
+	else
+		notify("Slaps", "No se obtuvo ninguna tool nueva (ya las tienes, están en tiempo de espera o son de pago)")
+	end
+end
+
+SlapsTab:Button({
+	Title = "Obtener todas las tools",
+	Desc = "Toca todos los ToolGivers del mapa",
+	Callback = function()
+		task.spawn(giveAllTools)
+	end,
+})
+
+local ToolCooldowns = {}
+local LastSlapAt = {}
+local SlapAuraWarned = false
+
+local function getEquippedSlap()
+	local character = LocalPlayer.Character
+	if not character then
+		return nil
+	end
+	for _, obj in ipairs(character:GetChildren()) do
+		if obj:IsA("Tool") and (CollectionService:HasTag(obj, "Slap") or obj:FindFirstChild("SlapHandler")) then
+			return obj
+		end
+	end
+	return nil
+end
+
+local function getToolCooldown(toolName)
+	local cached = ToolCooldowns[toolName]
+	if cached then
+		return cached
+	end
+	ToolCooldowns[toolName] = 3
+	task.spawn(function()
+		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+		local getConfig = remotes and remotes:FindFirstChild("GetToolConfig")
+		if getConfig and getConfig:IsA("RemoteFunction") then
+			local ok, config = pcall(getConfig.InvokeServer, getConfig, toolName)
+			if ok and typeof(config) == "table" and typeof(config.cooldown) == "number" then
+				ToolCooldowns[toolName] = config.cooldown
+			end
+		end
+	end)
+	return ToolCooldowns[toolName]
+end
+
+task.spawn(function()
+	while true do
+		if SlapAura then
+			pcall(function()
+				local root = getRoot(LocalPlayer.Character)
+				local hum = getHumanoid(LocalPlayer.Character)
+				if not root or not hum or hum.Health <= 0 then
+					return
+				end
+				local tool = getEquippedSlap()
+				if not tool then
+					if not SlapAuraWarned then
+						SlapAuraWarned = true
+						notify("Slap Aura", "Equipa una tool de slap para que funcione")
+					end
+					return
+				end
+				SlapAuraWarned = false
+				local target = findHitboxTarget(root.Position)
+				if not target then
+					return
+				end
+				local now = os.clock()
+				if AntiCooldown then
+					LastSlapAt[tool.Name] = now
+					tool:Activate()
+					return
+				end
+				local cooldown = getToolCooldown(tool.Name)
+				if now - (LastSlapAt[tool.Name] or 0) >= cooldown + 0.1 then
+					LastSlapAt[tool.Name] = now
+					tool:Activate()
+				end
+			end)
+		end
+		if SlapAura and AntiCooldown then
+			RunService.Heartbeat:Wait()
+		else
+			task.wait(0.1)
+		end
+	end
+end)
+
+addSaved(SlapsTab, "Toggle", "SlapAura", {
+	Title = "Slap Aura",
+	Desc = "Pega solo al jugador más cercano dentro del rango de la Hitbox",
+	Value = false,
+	Callback = function(state)
+		SlapAura = state
+		SlapAuraWarned = false
+		if state and not (hookmetamethod and getnamecallmethod) then
+			notify("Slap Aura", "Sin hookmetamethod sólo pegará a jugadores muy cercanos")
+		end
+	end,
+})
+
+local AntiRagdoll = false
+local LastSafeCFrame = nil
+local LockUntil = 0
+local ARConnections = {}
+local BadStates = {
+	Enum.HumanoidStateType.Ragdoll,
+	Enum.HumanoidStateType.FallingDown,
+	Enum.HumanoidStateType.Physics,
+}
+local MoverClasses = {
+	BodyVelocity = true,
+	BodyPosition = true,
+	BodyGyro = true,
+	BodyThrust = true,
+	BodyForce = true,
+	BodyAngularVelocity = true,
+	LinearVelocity = true,
+	VectorForce = true,
+	AngularVelocity = true,
+	AlignPosition = true,
+	AlignOrientation = true,
+	BallSocketConstraint = true,
+}
+
+local function setBadStates(hum, enabled)
+	for _, state in ipairs(BadStates) do
+		pcall(function()
+			hum:SetStateEnabled(state, enabled)
+		end)
+	end
+end
+
+local function clearMovers(character)
+	for _, obj in ipairs(character:GetDescendants()) do
+		if MoverClasses[obj.ClassName] and not obj:FindFirstAncestorOfClass("Tool") then
+			obj:Destroy()
+		elseif obj:IsA("Motor6D") and not obj.Enabled then
+			obj.Enabled = true
+		end
+	end
+end
+
+local function disconnectAR()
+	for _, c in ipairs(ARConnections) do
+		c:Disconnect()
+	end
+	table.clear(ARConnections)
+end
+
+local function bindAntiRagdoll(character)
+	disconnectAR()
+	if not AntiRagdoll or not character then
+		return
+	end
+	local hum = character:WaitForChild("Humanoid", 10)
+	if not hum then
+		return
+	end
+	setBadStates(hum, false)
+	LastSafeCFrame = nil
+	LockUntil = 0
+	table.insert(ARConnections, character.DescendantAdded:Connect(function(obj)
+		if not AntiRagdoll then
+			return
+		end
+		if MoverClasses[obj.ClassName] and not obj:FindFirstAncestorOfClass("Tool") then
+			LockUntil = os.clock() + 0.35
+			task.defer(function()
+				if obj.Parent then
+					obj:Destroy()
+				end
+			end)
+		end
+	end))
+	table.insert(ARConnections, hum.StateChanged:Connect(function(_, new)
+		if not AntiRagdoll then
+			return
+		end
+		if new == Enum.HumanoidStateType.Ragdoll or new == Enum.HumanoidStateType.FallingDown or new == Enum.HumanoidStateType.Physics then
+			LockUntil = os.clock() + 0.35
+			hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end
+	end))
+end
+
+RunService.Heartbeat:Connect(function()
+	if not AntiRagdoll then
+		return
+	end
+	local character = LocalPlayer.Character
+	local root = getRoot(character)
+	local hum = getHumanoid(character)
+	if not root or not hum or hum.Health <= 0 then
+		return
+	end
+	local now = os.clock()
+	local velocity = root.AssemblyLinearVelocity
+	local horizontal = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+	local maxHorizontal = hum.WalkSpeed * 1.5 + 8
+	local maxUp = math.max(hum.JumpPower, 50) + 20
+	local knocked = horizontal > maxHorizontal or velocity.Y > maxUp or hum.PlatformStand
+	if hum.PlatformStand then
+		hum.PlatformStand = false
+	end
+	if knocked then
+		LockUntil = now + 0.35
+		clearMovers(character)
+	end
+	if now < LockUntil and LastSafeCFrame then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		root.CFrame = LastSafeCFrame
+	elseif not knocked then
+		LastSafeCFrame = root.CFrame
+	end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+	if AntiRagdoll then
+		task.spawn(bindAntiRagdoll, character)
+	end
+end)
+
+addSaved(PlayerTab, "Toggle", "AntiRagdoll", {
+	Title = "Anti-Ragdoll",
+	Desc = "Evita caer al vacío",
+	Value = false,
+	Callback = function(state)
+		AntiRagdoll = state
+		local character = LocalPlayer.Character
+		if state then
+			task.spawn(bindAntiRagdoll, character)
+		else
+			disconnectAR()
+			local hum = getHumanoid(character)
+			if hum then
+				setBadStates(hum, true)
+			end
+			LastSafeCFrame = nil
+			LockUntil = 0
+		end
+	end,
+})
+
+local EliminateEffects = false
+local EffectNames = {
+	SadTrollface = true,
+	EvilTrollface = true,
+}
+local DisabledEffectConns = {}
+local EffectWatchers = {}
+
+local function isTrollEffect(obj)
+	return EffectNames[obj.Name] == true
+end
+
+local function hideRevengeGui(gui)
+	if gui and gui:IsA("ScreenGui") then
+		gui.Enabled = false
+	end
+end
+
+local function watchRevengeGui(gui)
+	if not gui or not gui:IsA("ScreenGui") or gui.Name ~= "RevengeGui" then
+		return
+	end
+	hideRevengeGui(gui)
+	table.insert(EffectWatchers, gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+		if EliminateEffects and gui.Enabled then
+			gui.Enabled = false
+		end
+	end))
+end
+
+local function setEliminateEffects(state)
+	if state == EliminateEffects then
+		return
+	end
+	EliminateEffects = state
+	if state then
+		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+		local revenge = remotes and remotes:FindFirstChild("Revenge")
+		if revenge and getconnections then
+			pcall(function()
+				for _, conn in ipairs(getconnections(revenge.OnClientEvent)) do
+					conn:Disable()
+					table.insert(DisabledEffectConns, conn)
+				end
+			end)
+		end
+		local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		if playerGui then
+			watchRevengeGui(playerGui:FindFirstChild("RevengeGui"))
+			table.insert(EffectWatchers, playerGui.ChildAdded:Connect(function(child)
+				if EliminateEffects then
+					watchRevengeGui(child)
+				end
+			end))
+		end
+		for _, obj in ipairs(Workspace:GetDescendants()) do
+			if isTrollEffect(obj) then
+				pcall(obj.Destroy, obj)
+			end
+		end
+		table.insert(EffectWatchers, Workspace.DescendantAdded:Connect(function(obj)
+			if EliminateEffects and isTrollEffect(obj) then
+				task.defer(function()
+					if obj.Parent then
+						obj:Destroy()
+					end
+				end)
+			end
+		end))
+	else
+		for _, conn in ipairs(DisabledEffectConns) do
+			pcall(function()
+				conn:Enable()
+			end)
+		end
+		table.clear(DisabledEffectConns)
+		for _, c in ipairs(EffectWatchers) do
+			c:Disconnect()
+		end
+		table.clear(EffectWatchers)
+	end
+end
+
+addSaved(PlayerTab, "Toggle", "EliminateEffects", {
+	Title = "Eliminate Effects",
+	Desc = "Quita las pantallas y caras Trollface cuando te pegan",
+	Value = false,
+	Callback = setEliminateEffects,
+})
+
+local DesiredWalkSpeed = nil
+local DesiredJumpPower = nil
+local AntiTroll = false
+local AntiTrollConns = {}
+local DefaultWalkSpeed, DefaultJumpPower = 16, 50
+
+local function inBattleCountdown()
+	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	local gui = playerGui and playerGui:FindFirstChild("SlapBattleCountdownGui")
+	return gui ~= nil and gui.Enabled
+end
+
+local function enforceMovement(hum)
+	if not hum or hum.Health <= 0 or inBattleCountdown() then
+		return
+	end
+	local walk = DesiredWalkSpeed or (AntiTroll and hum.WalkSpeed < DefaultWalkSpeed and DefaultWalkSpeed) or nil
+	if walk and hum.WalkSpeed ~= walk then
+		hum.WalkSpeed = walk
+	end
+	local jump = DesiredJumpPower or (AntiTroll and hum.UseJumpPower and hum.JumpPower < DefaultJumpPower and DefaultJumpPower) or nil
+	if jump then
+		hum.UseJumpPower = true
+		if hum.JumpPower ~= jump then
+			hum.JumpPower = jump
+		end
+	end
+end
+
+local TrollFxClasses = {
+	Fire = true,
+	Smoke = true,
+	Sparkles = true,
+	Explosion = true,
+}
+
+local function isTrollFx(obj)
+	return TrollFxClasses[obj.ClassName] == true and not obj:FindFirstAncestorOfClass("Tool")
+end
+
+local function cleanTrollCharacter(character)
+	for _, obj in ipairs(character:GetDescendants()) do
+		if isTrollFx(obj) then
+			pcall(obj.Destroy, obj)
+		elseif obj:IsA("BasePart") and obj.Anchored then
+			obj.Anchored = false
+		end
+	end
+end
+
+local function bindAntiTroll(character)
+	for _, c in ipairs(AntiTrollConns) do
+		c:Disconnect()
+	end
+	table.clear(AntiTrollConns)
+	if not AntiTroll or not character then
+		return
+	end
+	cleanTrollCharacter(character)
+	table.insert(AntiTrollConns, character.DescendantAdded:Connect(function(obj)
+		if AntiTroll and isTrollFx(obj) then
+			task.defer(function()
+				if obj.Parent then
+					obj:Destroy()
+				end
+			end)
+		end
+	end))
+	table.insert(AntiTrollConns, Workspace.ChildAdded:Connect(function(obj)
+		if AntiTroll and obj:IsA("Explosion") then
+			local root = getRoot(LocalPlayer.Character)
+			if root and (obj.Position - root.Position).Magnitude <= obj.BlastRadius + 10 then
+				obj.BlastPressure = 0
+				obj.Visible = false
+			end
+		end
+	end))
+end
+
+local LastTrollSafe = nil
+
+RunService.Heartbeat:Connect(function()
+	local character = LocalPlayer.Character
+	local hum = getHumanoid(character)
+	if DesiredWalkSpeed or DesiredJumpPower or AntiTroll then
+		pcall(enforceMovement, hum)
+	end
+	if not AntiTroll then
+		return
+	end
+	local root = getRoot(character)
+	if not root or not hum or hum.Health <= 0 then
+		return
+	end
+	if root.Anchored then
+		root.Anchored = false
+	end
+	local velocity = root.AssemblyLinearVelocity
+	if velocity.Magnitude > 120 or root.AssemblyAngularVelocity.Magnitude > 40 then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		if LastTrollSafe then
+			root.CFrame = LastTrollSafe
+		end
+	else
+		LastTrollSafe = root.CFrame
+	end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+	LastTrollSafe = nil
+	if AntiTroll then
+		task.spawn(bindAntiTroll, character)
+	end
+end)
+
+addSaved(PlayerTab, "Toggle", "AntiTroll", {
+	Title = "Anti-Troll",
+	Desc = "Bloquea Fling, Freeze, Fire y Explode en tu personaje",
+	Value = false,
+	Callback = function(state)
+		AntiTroll = state
+		LastTrollSafe = nil
+		bindAntiTroll(state and LocalPlayer.Character or nil)
+	end,
+})
+
+addSaved(PlayerTab, "Input", "WalkSpeed", {
+	Title = "WalkSpeed",
+	Placeholder = "Velocidad (vacío = normal)…",
+	Value = "",
+	Callback = function(text)
+		local value = tonumber(text)
+		DesiredWalkSpeed = value and math.clamp(value, 0, 500) or nil
+		if not DesiredWalkSpeed then
+			local hum = getHumanoid(LocalPlayer.Character)
+			if hum then
+				hum.WalkSpeed = DefaultWalkSpeed
+			end
+		end
+	end,
+})
+
+addSaved(PlayerTab, "Input", "JumpPower", {
+	Title = "JumpPower",
+	Placeholder = "Salto (vacío = normal)…",
+	Value = "",
+	Callback = function(text)
+		local value = tonumber(text)
+		DesiredJumpPower = value and math.clamp(value, 0, 1000) or nil
+		if not DesiredJumpPower then
+			local hum = getHumanoid(LocalPlayer.Character)
+			if hum then
+				hum.JumpPower = DefaultJumpPower
+			end
+		end
+	end,
+})
+
+local CooldownOriginals = setmetatable({}, { __mode = "k" })
+local GetToolConfigRemote = nil
+
+task.spawn(function()
+	local remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
+	if remotes then
+		GetToolConfigRemote = remotes:WaitForChild("GetToolConfig", 15)
+	end
+end)
+
+local function isSlapConfig(t)
+	return typeof(rawget(t, "cooldown")) == "number" and rawget(t, "hitMarker") ~= nil and rawget(t, "animationId") ~= nil
+end
+
+local function patchCooldownTables()
+	if typeof(getgc) ~= "function" then
+		return 0
+	end
+	local patched = 0
+	for _, obj in ipairs(getgc(true)) do
+		if type(obj) == "table" then
+			local ok, match = pcall(isSlapConfig, obj)
+			if ok and match then
+				if CooldownOriginals[obj] == nil and obj.cooldown ~= 0 then
+					CooldownOriginals[obj] = obj.cooldown
+				end
+				if obj.cooldown ~= 0 then
+					pcall(function()
+						obj.cooldown = 0
+					end)
+				end
+				patched += 1
+			end
+		end
+	end
+	return patched
+end
+
+local function restoreCooldownTables()
+	for t, value in pairs(CooldownOriginals) do
+		pcall(function()
+			t.cooldown = value
+		end)
+	end
+	table.clear(CooldownOriginals)
+end
+
+if hookmetamethod and getnamecallmethod then
+	local wrap = newcclosure or function(f)
+		return f
+	end
+	local oldCooldownNamecall
+	oldCooldownNamecall = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+		if AntiCooldown and GetToolConfigRemote and self == GetToolConfigRemote and getnamecallmethod() == "InvokeServer" then
+			local results = table.pack(oldCooldownNamecall(self, ...))
+			local config = results[1]
+			if type(config) == "table" and typeof(config.cooldown) == "number" then
+				CooldownOriginals[config] = config.cooldown
+				config.cooldown = 0
+			end
+			return table.unpack(results, 1, results.n)
+		end
+		return oldCooldownNamecall(self, ...)
+	end))
+end
+
+task.spawn(function()
+	while true do
+		if AntiCooldown then
+			pcall(patchCooldownTables)
+		end
+		task.wait(2)
+	end
+end)
+
+addSaved(PlayerTab, "Toggle", "AntiCooldown", {
+	Title = "Anti-Cooldown",
+	Desc = "Quita el cooldown de todas las Slap",
+	Value = false,
+	Callback = function(state)
+		AntiCooldown = state
+		if state then
+			if typeof(getgc) ~= "function" then
+				notify("Anti-Cooldown", "Tu executor no soporta getgc: sólo afectará a las tools nuevas")
+			else
+				local ok, count = pcall(patchCooldownTables)
+				if ok and count == 0 then
+					notify("Anti-Cooldown", "No se encontró ninguna Slap cargada todavía")
+				end
+			end
+		else
+			restoreCooldownTables()
+		end
+	end,
+})
+
+local AntiAfk = false
+local AfkDisabledConns = {}
+local AfkConnection = nil
+local VirtualUser = game:GetService("VirtualUser")
+
+local function simulateActivity()
+	pcall(function()
+		VirtualUser:CaptureController()
+		VirtualUser:ClickButton2(Vector2.new())
+	end)
+end
+
+local function setAntiAfk(state)
+	if state == AntiAfk then
+		return
+	end
+	AntiAfk = state
+	if state then
+		if typeof(getconnections) == "function" then
+			pcall(function()
+				for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
+					conn:Disable()
+					table.insert(AfkDisabledConns, conn)
+				end
+			end)
+		end
+		AfkConnection = LocalPlayer.Idled:Connect(function()
+			if AntiAfk then
+				simulateActivity()
+			end
+		end)
+	else
+		if AfkConnection then
+			AfkConnection:Disconnect()
+			AfkConnection = nil
+		end
+		for _, conn in ipairs(AfkDisabledConns) do
+			pcall(function()
+				conn:Enable()
+			end)
+		end
+		table.clear(AfkDisabledConns)
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(60)
+		if AntiAfk then
+			simulateActivity()
+		end
+	end
+end)
+
+addSaved(PlayerTab, "Toggle", "AntiAfk", {
+	Title = "Anti-Afk",
+	Desc = "Evita que Roblox te saque por estar 20 minutos inactivo",
+	Value = false,
+	Callback = setAntiAfk,
+})
+
+local EspEnabled = false
+local EspHighlights = {}
+
+local function clearEsp()
+	for character, hl in pairs(EspHighlights) do
+		pcall(hl.Destroy, hl)
+		EspHighlights[character] = nil
+	end
+end
+
+local function updateEsp()
+	local alive = {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer and plr.Character then
+			local character = plr.Character
+			local hum = getHumanoid(character)
+			if hum and hum.Health > 0 then
+				alive[character] = true
+				local hl = EspHighlights[character]
+				if not hl or not hl.Parent then
+					hl = Instance.new("Highlight")
+					hl.Name = "NB_ESP"
+					hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+					hl.FillTransparency = 0.6
+					hl.OutlineTransparency = 0
+					hl.Adornee = character
+					hl.Parent = AdornParent
+					EspHighlights[character] = hl
+				end
+				local color = plr.TeamColor and plr.Team and plr.TeamColor.Color or Color3.fromRGB(255, 70, 70)
+				hl.FillColor = color
+				hl.OutlineColor = Color3.new(1, 1, 1)
+			end
+		end
+	end
+	for character, hl in pairs(EspHighlights) do
+		if not alive[character] then
+			pcall(hl.Destroy, hl)
+			EspHighlights[character] = nil
+		end
+	end
+end
+
+task.spawn(function()
+	while true do
+		if EspEnabled then
+			pcall(updateEsp)
+		end
+		task.wait(0.5)
+	end
+end)
+
+addSaved(EspTab, "Toggle", "EspHighlight", {
+	Title = "ESP Highlight",
+	Desc = "Silueta de los jugadores a través de las paredes",
+	Value = false,
+	Callback = function(state)
+		EspEnabled = state
+		if state then
+			pcall(updateEsp)
+		else
+			clearEsp()
+		end
+	end,
+})
+
+local AuraDouble = false
+local AuraCustom = nil
+local AuraGuard = false
+local AuraValues = {}
+local AuraAttributes = {}
+local Suffixes = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, QA = 1e15, QI = 1e18 }
+local SuffixOrder = { { "Qi", 1e18 }, { "Qa", 1e15 }, { "T", 1e12 }, { "B", 1e9 }, { "M", 1e6 }, { "K", 1e3 } }
+
+local function suffixValue(suffix)
+	if not suffix or suffix == "" then
+		return 1
+	end
+	return Suffixes[suffix:upper()]
+end
+
+local function findNumber(text)
+	local s, e, num, suffix = text:find("(%d[%d,]*%.?%d*)%s*(%a*)")
+	while s do
+		local clean = num:gsub(",", "")
+		local base = tonumber(clean)
+		local mult = suffixValue(suffix)
+		if base and mult then
+			local finish = e
+			if suffix == "" then
+				finish = s + #num - 1
+			end
+			return base * mult, s, finish
+		end
+		if base then
+			return base, s, s + #num - 1
+		end
+		s, e, num, suffix = text:find("(%d[%d,]*%.?%d*)%s*(%a*)", e + 1)
+	end
+	return nil
+end
+
+local function parseNumber(value)
+	if typeof(value) == "number" then
+		return value
+	end
+	if typeof(value) ~= "string" then
+		return nil
+	end
+	local number = findNumber(value)
+	return number
+end
+
+local function shortNumber(number)
+	for _, pair in ipairs(SuffixOrder) do
+		if number >= pair[2] then
+			local formatted = string.format("%.2f", number / pair[2]):gsub("%.?0+$", "")
+			return formatted .. pair[1]
+		end
+	end
+	return tostring(math.floor(number))
+end
+
+local function formatLike(original, number)
+	if typeof(original) ~= "string" then
+		return tostring(math.floor(number))
+	end
+	local _, s, e = findNumber(original)
+	if not s then
+		return shortNumber(number)
+	end
+	local segment = original:sub(s, e)
+	local replacement
+	if segment:find("%a") then
+		replacement = shortNumber(number)
+	elseif segment:find(",") then
+		replacement = tostring(math.floor(number)):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+	else
+		replacement = tostring(math.floor(number))
+	end
+	return original:sub(1, s - 1) .. replacement .. original:sub(e + 1)
+end
+
+local function auraActive()
+	return AuraDouble or AuraCustom ~= nil
+end
+
+local function displayAura(real)
+	local base = AuraCustom or real
+	if AuraDouble then
+		base = base * 2
+	end
+	return base
+end
+
+local function writeValue(obj, number, original)
+	AuraGuard = true
+	pcall(function()
+		if obj:IsA("IntValue") then
+			obj.Value = math.floor(number)
+		elseif obj:IsA("NumberValue") then
+			obj.Value = number
+		elseif obj:IsA("StringValue") then
+			obj.Value = formatLike(original, number)
+		elseif obj:IsA("TextLabel") or obj:IsA("TextButton") then
+			obj.Text = formatLike(original, number)
+		end
+	end)
+	AuraGuard = false
+end
+
+local function restoreValue(obj, raw)
+	AuraGuard = true
+	pcall(function()
+		if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+			obj.Text = raw
+		else
+			obj.Value = raw
+		end
+	end)
+	AuraGuard = false
+end
+
+local function writeAttribute(name, number)
+	AuraGuard = true
+	pcall(function()
+		LocalPlayer:SetAttribute(name, number)
+	end)
+	AuraGuard = false
+end
+
+local function refreshAura()
+	for obj, data in pairs(AuraValues) do
+		if obj.Parent then
+			if auraActive() then
+				writeValue(obj, displayAura(data.Real), data.Raw)
+			else
+				restoreValue(obj, data.Raw)
+			end
+		else
+			AuraValues[obj] = nil
+		end
+	end
+	for name, data in pairs(AuraAttributes) do
+		if auraActive() then
+			writeAttribute(name, displayAura(data.Real))
+		else
+			writeAttribute(name, data.Raw)
+		end
+	end
+end
+
+local function nameHasAura(obj)
+	local current = obj
+	for _ = 1, 3 do
+		if not current then
+			break
+		end
+		if current.Name:lower():find("aura") then
+			return true
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+local function isAuraHolder(obj)
+	if obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("StringValue") then
+		return obj.Name:lower():find("aura") ~= nil
+	end
+	if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+		if obj:FindFirstAncestor("NucleoBlox") or obj:FindFirstAncestor("WindUI") then
+			return false
+		end
+		if obj:FindFirstAncestor("2XAuraAD") or obj:FindFirstAncestor("AuraShop") then
+			return false
+		end
+		return nameHasAura(obj)
+	end
+	return false
+end
+
+local function readRaw(obj)
+	if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+		return obj.Text
+	end
+	return obj.Value
+end
+
+local function trackValue(obj)
+	if AuraValues[obj] or not isAuraHolder(obj) then
+		return
+	end
+	local raw = readRaw(obj)
+	local real = parseNumber(raw)
+	if not real then
+		return
+	end
+	AuraValues[obj] = { Real = real, Raw = raw }
+	local signal = (obj:IsA("TextLabel") or obj:IsA("TextButton")) and obj:GetPropertyChangedSignal("Text") or obj.Changed
+	signal:Connect(function()
+		if AuraGuard or not AuraValues[obj] then
+			return
+		end
+		local newRaw = readRaw(obj)
+		local parsed = parseNumber(newRaw)
+		if parsed then
+			AuraValues[obj].Real = parsed
+			AuraValues[obj].Raw = newRaw
+			if auraActive() then
+				writeValue(obj, displayAura(parsed), newRaw)
+			end
+		end
+	end)
+	if auraActive() then
+		writeValue(obj, displayAura(real), raw)
+	end
+end
+
+local function trackAttribute(name)
+	if AuraAttributes[name] or not name:lower():find("aura") then
+		return
+	end
+	local value = LocalPlayer:GetAttribute(name)
+	if typeof(value) ~= "number" then
+		return
+	end
+	AuraAttributes[name] = { Real = value, Raw = value }
+	LocalPlayer:GetAttributeChangedSignal(name):Connect(function()
+		if AuraGuard then
+			return
+		end
+		local newValue = LocalPlayer:GetAttribute(name)
+		if typeof(newValue) == "number" then
+			AuraAttributes[name].Real = newValue
+			AuraAttributes[name].Raw = newValue
+			if auraActive() then
+				writeAttribute(name, displayAura(newValue))
+			end
+		end
+	end)
+end
+
+local function trackContainer(container)
+	if not container then
+		return
+	end
+	for _, obj in ipairs(container:GetDescendants()) do
+		trackValue(obj)
+	end
+	container.DescendantAdded:Connect(function(obj)
+		task.defer(trackValue, obj)
+	end)
+end
+
+task.spawn(function()
+	for name in pairs(LocalPlayer:GetAttributes()) do
+		trackAttribute(name)
+	end
+	LocalPlayer.AttributeChanged:Connect(trackAttribute)
+	for _, child in ipairs(LocalPlayer:GetChildren()) do
+		if not child:IsA("Backpack") and not child:IsA("PlayerScripts") then
+			trackContainer(child)
+		end
+	end
+	LocalPlayer.ChildAdded:Connect(function(child)
+		if not child:IsA("Backpack") and not child:IsA("PlayerScripts") and not child:IsA("PlayerGui") then
+			trackContainer(child)
+		end
+	end)
+	local function onCharacter(character)
+		trackContainer(character)
+	end
+	if LocalPlayer.Character then
+		onCharacter(LocalPlayer.Character)
+	end
+	LocalPlayer.CharacterAdded:Connect(onCharacter)
+end)
+
+addSaved(AuraTab, "Toggle", "AuraDouble", {
+	Title = "×2 Aura",
+	Desc = "Multiplica tu aura (visual)",
+	Value = false,
+	Callback = function(state)
+		AuraDouble = state
+		refreshAura()
+	end,
+})
+
+addSaved(AuraTab, "Input", "AuraCustom", {
+	Title = "Aura",
+	Placeholder = "Ingresa el aura deseada…",
+	Value = "",
+	Callback = function(text)
+		AuraCustom = parseNumber(text)
+		refreshAura()
+	end,
+})
+
+AuraTab:Paragraph({
+	Title = "Esta opción es sólo visual (sólo tu la ves)",
+})
+
+local LightingOriginals = nil
+local PartOriginals = {}
+local BlocksConnection = nil
+local EffectObjects = {}
+local AtmosphereOriginal = nil
+
+local function isCharacterPart(part)
+	local model = part:FindFirstAncestorOfClass("Model")
+	while model do
+		if model:FindFirstChildOfClass("Humanoid") then
+			return true
+		end
+		model = model:FindFirstAncestorOfClass("Model")
+	end
+	return false
+end
+
+local function enhancePart(part)
+	if not part:IsA("BasePart") or part:IsA("Terrain") or PartOriginals[part] or isCharacterPart(part) then
+		return
+	end
+	if part.Transparency >= 1 then
+		return
+	end
+	PartOriginals[part] = {
+		Material = part.Material,
+		Reflectance = part.Reflectance,
+		CastShadow = part.CastShadow,
+	}
+	part.CastShadow = true
+	local material = part.Material
+	if material == Enum.Material.SmoothPlastic then
+		part.Material = Enum.Material.Plastic
+	elseif material == Enum.Material.Glass and part.Reflectance < 0.25 then
+		part.Reflectance = 0.25
+	elseif (material == Enum.Material.Metal or material == Enum.Material.DiamondPlate or material == Enum.Material.Foil or material == Enum.Material.CorrodedMetal) and part.Reflectance < 0.12 then
+		part.Reflectance = 0.12
+	elseif material == Enum.Material.Ice and part.Reflectance < 0.15 then
+		part.Reflectance = 0.15
+	end
+end
+
+local MaterialService = game:GetService("MaterialService")
+local QualityOriginals = nil
+
+local function setMaxQuality(state)
+	if state then
+		QualityOriginals = {}
+		pcall(function()
+			QualityOriginals.QualityLevel = settings().Rendering.QualityLevel
+			settings().Rendering.QualityLevel = Enum.QualityLevel.Level21
+		end)
+		pcall(function()
+			QualityOriginals.MeshPartDetailLevel = settings().Rendering.MeshPartDetailLevel
+			settings().Rendering.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level04
+		end)
+		pcall(function()
+			QualityOriginals.Use2022Materials = MaterialService.Use2022Materials
+			if sethiddenproperty then
+				sethiddenproperty(MaterialService, "Use2022Materials", true)
+			else
+				MaterialService.Use2022Materials = true
+			end
+		end)
+	elseif QualityOriginals then
+		pcall(function()
+			if QualityOriginals.QualityLevel then
+				settings().Rendering.QualityLevel = QualityOriginals.QualityLevel
+			end
+		end)
+		pcall(function()
+			if QualityOriginals.MeshPartDetailLevel then
+				settings().Rendering.MeshPartDetailLevel = QualityOriginals.MeshPartDetailLevel
+			end
+		end)
+		pcall(function()
+			if QualityOriginals.Use2022Materials ~= nil then
+				if sethiddenproperty then
+					sethiddenproperty(MaterialService, "Use2022Materials", QualityOriginals.Use2022Materials)
+				else
+					MaterialService.Use2022Materials = QualityOriginals.Use2022Materials
+				end
+			end
+		end)
+		QualityOriginals = nil
+	end
+end
+
+local function setLightingBlocks(state)
+	if state then
+		LightingOriginals = {
+			GlobalShadows = Lighting.GlobalShadows,
+			ShadowSoftness = Lighting.ShadowSoftness,
+			EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale,
+			EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+		}
+		pcall(function()
+			LightingOriginals.Technology = Lighting.Technology
+		end)
+		Lighting.GlobalShadows = true
+		Lighting.ShadowSoftness = 0.1
+		Lighting.EnvironmentDiffuseScale = 1
+		Lighting.EnvironmentSpecularScale = 1
+		if sethiddenproperty then
+			pcall(sethiddenproperty, Lighting, "Technology", Enum.Technology.Future)
+		end
+		setMaxQuality(true)
+		task.spawn(function()
+			local count = 0
+			for _, obj in ipairs(Workspace:GetDescendants()) do
+				if not LightingOriginals then
+					return
+				end
+				enhancePart(obj)
+				count += 1
+				if count % 800 == 0 then
+					task.wait()
+				end
+			end
+		end)
+		BlocksConnection = Workspace.DescendantAdded:Connect(function(obj)
+			task.defer(enhancePart, obj)
+		end)
+	else
+		if BlocksConnection then
+			BlocksConnection:Disconnect()
+			BlocksConnection = nil
+		end
+		if LightingOriginals then
+			Lighting.GlobalShadows = LightingOriginals.GlobalShadows
+			Lighting.ShadowSoftness = LightingOriginals.ShadowSoftness
+			Lighting.EnvironmentDiffuseScale = LightingOriginals.EnvironmentDiffuseScale
+			Lighting.EnvironmentSpecularScale = LightingOriginals.EnvironmentSpecularScale
+			if LightingOriginals.Technology and sethiddenproperty then
+				pcall(sethiddenproperty, Lighting, "Technology", LightingOriginals.Technology)
+			end
+			LightingOriginals = nil
+		end
+		setMaxQuality(false)
+		for part, data in pairs(PartOriginals) do
+			if part.Parent then
+				part.Material = data.Material
+				part.Reflectance = data.Reflectance
+				part.CastShadow = data.CastShadow
+			end
+		end
+		table.clear(PartOriginals)
+	end
+end
+
+local EffectsLightingOriginal = nil
+
+local function setRealisticEffects(state)
+	if state then
+		EffectsLightingOriginal = {
+			ExposureCompensation = Lighting.ExposureCompensation,
+			Brightness = Lighting.Brightness,
+		}
+		Lighting.ExposureCompensation = 0.15
+		Lighting.Brightness = math.max(Lighting.Brightness, 2.5)
+
+		local bloom = Instance.new("BloomEffect")
+		bloom.Name = "NB_Bloom"
+		bloom.Intensity = 0.6
+		bloom.Size = 28
+		bloom.Threshold = 0.9
+		bloom.Parent = Lighting
+
+		local sunRays = Instance.new("SunRaysEffect")
+		sunRays.Name = "NB_SunRays"
+		sunRays.Intensity = 0.08
+		sunRays.Spread = 0.2
+		sunRays.Parent = Lighting
+
+		local color = Instance.new("ColorCorrectionEffect")
+		color.Name = "NB_Color"
+		color.Brightness = 0.02
+		color.Contrast = 0.15
+		color.Saturation = 0.12
+		color.TintColor = Color3.fromRGB(255, 248, 240)
+		color.Parent = Lighting
+
+		local dof = Instance.new("DepthOfFieldEffect")
+		dof.Name = "NB_DOF"
+		dof.FarIntensity = 0.12
+		dof.FocusDistance = 45
+		dof.InFocusRadius = 45
+		dof.NearIntensity = 0
+		dof.Parent = Lighting
+
+		EffectObjects = { bloom, sunRays, color, dof }
+
+		local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
+		if atmosphere then
+			AtmosphereOriginal = {
+				Object = atmosphere,
+				Density = atmosphere.Density,
+				Haze = atmosphere.Haze,
+				Glare = atmosphere.Glare,
+			}
+		else
+			atmosphere = Instance.new("Atmosphere")
+			atmosphere.Name = "NB_Atmosphere"
+			atmosphere.Parent = Lighting
+			table.insert(EffectObjects, atmosphere)
+			AtmosphereOriginal = nil
+		end
+		atmosphere.Density = 0.3
+		atmosphere.Haze = 1.2
+		atmosphere.Glare = 0.4
+	else
+		for _, obj in ipairs(EffectObjects) do
+			if obj then
+				obj:Destroy()
+			end
+		end
+		table.clear(EffectObjects)
+		if AtmosphereOriginal and AtmosphereOriginal.Object.Parent then
+			AtmosphereOriginal.Object.Density = AtmosphereOriginal.Density
+			AtmosphereOriginal.Object.Haze = AtmosphereOriginal.Haze
+			AtmosphereOriginal.Object.Glare = AtmosphereOriginal.Glare
+		end
+		AtmosphereOriginal = nil
+		if EffectsLightingOriginal then
+			Lighting.ExposureCompensation = EffectsLightingOriginal.ExposureCompensation
+			Lighting.Brightness = EffectsLightingOriginal.Brightness
+			EffectsLightingOriginal = nil
+		end
+	end
+end
+
+local BlocksOn, EffectsOn, GenOn = false, false, false
+local GenOriginals = nil
+local GenObjects = {}
+local GenGlows = {}
+local GenConnections = {}
+local GenMaxGlows = 150
+
+local function addGlow(part)
+	if not GenOn or GenGlows[part] then
+		return
+	end
+	if not part:IsA("BasePart") or part.Material ~= Enum.Material.Neon or part.Transparency >= 0.9 then
+		return
+	end
+	local count = 0
+	for _ in pairs(GenGlows) do
+		count += 1
+	end
+	if count >= GenMaxGlows or isCharacterPart(part) or part:FindFirstChildOfClass("PointLight") then
+		return
+	end
+	local light = Instance.new("PointLight")
+	light.Name = "NBG_Glow"
+	light.Color = part.Color
+	light.Brightness = 1.2
+	light.Range = math.clamp(part.Size.Magnitude * 1.5, 6, 18)
+	light.Shadows = false
+	light.Parent = part
+	GenGlows[part] = light
+end
+
+local function setShadersGen(state)
+	if state then
+		GenOriginals = {
+			Ambient = Lighting.Ambient,
+			OutdoorAmbient = Lighting.OutdoorAmbient,
+			Brightness = Lighting.Brightness,
+			ExposureCompensation = Lighting.ExposureCompensation,
+			GlobalShadows = Lighting.GlobalShadows,
+			ShadowSoftness = Lighting.ShadowSoftness,
+			EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale,
+			EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+			ColorShift_Top = Lighting.ColorShift_Top,
+			ColorShift_Bottom = Lighting.ColorShift_Bottom,
+			GlobalWind = Workspace.GlobalWind,
+		}
+		pcall(function()
+			GenOriginals.Technology = Lighting.Technology
+		end)
+		local terrain = Workspace:FindFirstChildOfClass("Terrain")
+		if terrain then
+			GenOriginals.WaterWaveSize = terrain.WaterWaveSize
+			GenOriginals.WaterWaveSpeed = terrain.WaterWaveSpeed
+			GenOriginals.WaterReflectance = terrain.WaterReflectance
+			GenOriginals.WaterTransparency = terrain.WaterTransparency
+			pcall(function()
+				GenOriginals.Decoration = terrain.Decoration
+			end)
+		end
+
+		if sethiddenproperty then
+			pcall(sethiddenproperty, Lighting, "Technology", Enum.Technology.Future)
+		end
+		Lighting.GlobalShadows = true
+		Lighting.ShadowSoftness = 0.08
+		Lighting.EnvironmentDiffuseScale = 1
+		Lighting.EnvironmentSpecularScale = 1
+		Lighting.Brightness = 3
+		Lighting.ExposureCompensation = 0.1
+		Lighting.Ambient = Color3.fromRGB(70, 70, 80)
+		Lighting.OutdoorAmbient = Color3.fromRGB(135, 130, 125)
+		Lighting.ColorShift_Top = Color3.fromRGB(255, 240, 215)
+		Lighting.ColorShift_Bottom = Color3.fromRGB(120, 130, 160)
+
+		local bloom = Instance.new("BloomEffect")
+		bloom.Name = "NBG_Bloom"
+		bloom.Intensity = 0.8
+		bloom.Size = 32
+		bloom.Threshold = 0.85
+		bloom.Parent = Lighting
+
+		local sunRays = Instance.new("SunRaysEffect")
+		sunRays.Name = "NBG_SunRays"
+		sunRays.Intensity = 0.12
+		sunRays.Spread = 0.35
+		sunRays.Parent = Lighting
+
+		local grade = Instance.new("ColorCorrectionEffect")
+		grade.Name = "NBG_Grade"
+		grade.Brightness = 0.03
+		grade.Contrast = 0.2
+		grade.Saturation = 0.18
+		grade.TintColor = Color3.fromRGB(255, 246, 235)
+		grade.Parent = Lighting
+
+		local dof = Instance.new("DepthOfFieldEffect")
+		dof.Name = "NBG_DOF"
+		dof.FarIntensity = 0.18
+		dof.FocusDistance = 60
+		dof.InFocusRadius = 60
+		dof.NearIntensity = 0
+		dof.Parent = Lighting
+
+		GenObjects = { bloom, sunRays, grade, dof }
+
+		if terrain then
+			terrain.WaterWaveSize = 0.25
+			terrain.WaterWaveSpeed = 14
+			terrain.WaterReflectance = 1
+			terrain.WaterTransparency = 0.6
+			pcall(function()
+				if sethiddenproperty then
+					sethiddenproperty(terrain, "Decoration", true)
+				else
+					terrain.Decoration = true
+				end
+			end)
+			if not terrain:FindFirstChildOfClass("Clouds") then
+				local clouds = Instance.new("Clouds")
+				clouds.Name = "NBG_Clouds"
+				clouds.Cover = 0.55
+				clouds.Density = 0.65
+				clouds.Color = Color3.fromRGB(255, 252, 245)
+				clouds.Parent = terrain
+				table.insert(GenObjects, clouds)
+			end
+		end
+
+		Workspace.GlobalWind = Vector3.new(8, 0, 4)
+
+		task.spawn(function()
+			local count = 0
+			for _, obj in ipairs(Workspace:GetDescendants()) do
+				if not GenOn then
+					return
+				end
+				addGlow(obj)
+				count += 1
+				if count % 800 == 0 then
+					task.wait()
+				end
+			end
+		end)
+		table.insert(GenConnections, Workspace.DescendantAdded:Connect(function(obj)
+			task.defer(addGlow, obj)
+		end))
+
+		local startTime = os.clock()
+		table.insert(GenConnections, RunService.RenderStepped:Connect(function()
+			local t = os.clock() - startTime
+			local wave = math.sin(t * 0.6)
+			sunRays.Intensity = 0.12 + wave * 0.03
+			bloom.Intensity = 0.8 + math.sin(t * 0.9) * 0.08
+			grade.TintColor = Color3.fromRGB(255, 246 + math.floor(wave * 4), 235 + math.floor(wave * 6))
+			for part, light in pairs(GenGlows) do
+				if part.Parent and light.Parent then
+					light.Brightness = 1.2 + math.sin(t * 2 + part.Position.X * 0.1) * 0.35
+				else
+					GenGlows[part] = nil
+				end
+			end
+		end))
+	else
+		for _, c in ipairs(GenConnections) do
+			c:Disconnect()
+		end
+		table.clear(GenConnections)
+		for _, obj in ipairs(GenObjects) do
+			if obj then
+				obj:Destroy()
+			end
+		end
+		table.clear(GenObjects)
+		for _, light in pairs(GenGlows) do
+			if light then
+				light:Destroy()
+			end
+		end
+		table.clear(GenGlows)
+		if GenOriginals then
+			local o = GenOriginals
+			Lighting.Ambient = o.Ambient
+			Lighting.OutdoorAmbient = o.OutdoorAmbient
+			Lighting.Brightness = o.Brightness
+			Lighting.ExposureCompensation = o.ExposureCompensation
+			Lighting.ColorShift_Top = o.ColorShift_Top
+			Lighting.ColorShift_Bottom = o.ColorShift_Bottom
+			Workspace.GlobalWind = o.GlobalWind
+			if not BlocksOn then
+				Lighting.GlobalShadows = o.GlobalShadows
+				Lighting.ShadowSoftness = o.ShadowSoftness
+				Lighting.EnvironmentDiffuseScale = o.EnvironmentDiffuseScale
+				Lighting.EnvironmentSpecularScale = o.EnvironmentSpecularScale
+				if o.Technology and sethiddenproperty then
+					pcall(sethiddenproperty, Lighting, "Technology", o.Technology)
+				end
+			end
+			local terrain = Workspace:FindFirstChildOfClass("Terrain")
+			if terrain and o.WaterWaveSize then
+				terrain.WaterWaveSize = o.WaterWaveSize
+				terrain.WaterWaveSpeed = o.WaterWaveSpeed
+				terrain.WaterReflectance = o.WaterReflectance
+				terrain.WaterTransparency = o.WaterTransparency
+				if o.Decoration ~= nil then
+					pcall(function()
+						if sethiddenproperty then
+							sethiddenproperty(terrain, "Decoration", o.Decoration)
+						else
+							terrain.Decoration = o.Decoration
+						end
+					end)
+				end
+			end
+			GenOriginals = nil
+		end
+	end
+end
+
+addSaved(ShadersTab, "Toggle", "ShadersBlocks", {
+	Title = "Shaders Blocks",
+	Desc = "Máxima calidad de bloques, materiales y sombras",
+	Value = false,
+	Callback = function(state)
+		if state == BlocksOn then
+			return
+		end
+		BlocksOn = state
+		setLightingBlocks(state)
+	end,
+})
+
+addSaved(ShadersTab, "Toggle", "RealisticEffects", {
+	Title = "Realistics Effects",
+	Value = false,
+	Callback = function(state)
+		if state == EffectsOn then
+			return
+		end
+		EffectsOn = state
+		setRealisticEffects(state)
+	end,
+})
+
+addSaved(ShadersTab, "Toggle", "ShadersGen", {
+	Title = "Shaders Gen",
+	Desc = "Iluminación, luz, detalle y animaciones",
+	Value = false,
+	Callback = function(state)
+		if state == GenOn then
+			return
+		end
+		GenOn = state
+		setShadersGen(state)
+	end,
+})
+
+local SkinIds = { Face = nil, Shirt = nil, Pants = nil }
+local AssetCache = {}
+
+local function resolveTemplate(id, kind)
+	local key = kind .. id
+	if AssetCache[key] then
+		return AssetCache[key]
+	end
+	local result = "rbxassetid://" .. id
+	if game.GetObjects then
+		local ok, objects = pcall(function()
+			return game:GetObjects("rbxassetid://" .. id)
+		end)
+		if ok and objects then
+			for _, root in ipairs(objects) do
+				local candidates = { root }
+				for _, d in ipairs(root:GetDescendants()) do
+					table.insert(candidates, d)
+				end
+				for _, obj in ipairs(candidates) do
+					if kind == "Face" and obj:IsA("Decal") then
+						result = obj.Texture
+						break
+					elseif kind == "Shirt" and obj:IsA("Shirt") then
+						result = obj.ShirtTemplate
+						break
+					elseif kind == "Pants" and obj:IsA("Pants") then
+						result = obj.PantsTemplate
+						break
+					end
+				end
+			end
+		end
+	end
+	AssetCache[key] = result
+	return result
+end
+
+local function applySkin(kind)
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	local id = SkinIds[kind]
+	if kind == "Face" then
+		local head = character:FindFirstChild("Head") or character:WaitForChild("Head", 10)
+		if not head then
+			return
+		end
+		local decal = head:FindFirstChild("face") or head:FindFirstChildOfClass("Decal")
+		if not id then
+			if decal and decal:GetAttribute("NB_Original") then
+				decal.Texture = decal:GetAttribute("NB_Original")
+			end
+			return
+		end
+		if not decal then
+			decal = Instance.new("Decal")
+			decal.Name = "face"
+			decal.Face = Enum.NormalId.Front
+			decal.Parent = head
+		end
+		if decal:GetAttribute("NB_Original") == nil then
+			decal:SetAttribute("NB_Original", decal.Texture)
+		end
+		decal.Texture = resolveTemplate(id, "Face")
+	else
+		local className = kind
+		local property = kind == "Shirt" and "ShirtTemplate" or "PantsTemplate"
+		local clothing = character:FindFirstChildOfClass(className)
+		if not id then
+			if clothing and clothing:GetAttribute("NB_Original") then
+				clothing[property] = clothing:GetAttribute("NB_Original")
+			end
+			return
+		end
+		if not clothing then
+			clothing = Instance.new(className)
+			clothing.Name = className
+			clothing.Parent = character
+		end
+		if clothing:GetAttribute("NB_Original") == nil then
+			clothing:SetAttribute("NB_Original", clothing[property])
+		end
+		clothing[property] = resolveTemplate(id, kind)
+	end
+end
+
+local function applyAllSkins()
+	for kind in pairs(SkinIds) do
+		task.spawn(applySkin, kind)
+	end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+	character:WaitForChild("Head", 10)
+	task.wait(1)
+	applyAllSkins()
+end)
+
+LocalPlayer.CharacterAppearanceLoaded:Connect(function()
+	task.wait(0.5)
+	applyAllSkins()
+end)
+
+local function skinInput(kind, title, placeholder)
+	addSaved(SkinsTab, "Input", "Skin" .. kind, {
+		Title = title,
+		Placeholder = placeholder,
+		Value = "",
+		Callback = function(text)
+			SkinIds[kind] = text:match("%d+")
+			task.spawn(applySkin, kind)
+		end,
+	})
+end
+
+skinInput("Face", "Cara", "Ingresa el id de la cara…")
+skinInput("Shirt", "Camiseta/Camisa", "Ingresa el id de la camiseta/camisa…")
+skinInput("Pants", "Pantalón/Short", "Ingresa el id de el pantalón/short…")
+
+local ThemeNames = {}
+pcall(function()
+	for name in pairs(WindUI:GetThemes()) do
+		table.insert(ThemeNames, name)
+	end
+end)
+table.sort(ThemeNames)
+if #ThemeNames == 0 then
+	ThemeNames = { "Dark" }
+end
+
+addSaved(ConfigTab, "Dropdown", "Theme", {
+	Title = "Tema",
+	Values = ThemeNames,
+	Value = "Dark",
+	Callback = function(option)
+		local name = typeof(option) == "table" and option.Title or option
+		pcall(function()
+			WindUI:SetTheme(name)
+		end)
+	end,
+})
+
+addSaved(ConfigTab, "Dropdown", "Font", {
+	Title = "Fuente",
+	Values = FontNames,
+	Value = "Gotham SSm",
+	Callback = function(option)
+		local name = typeof(option) == "table" and option.Title or option
+		if Fonts[name] then
+			pcall(function()
+				WindUI:SetFont(Fonts[name])
+			end)
+		end
+	end,
+})
+
+addSaved(ConfigTab, "Toggle", "Transparency", {
+	Title = "Transparencia",
+	Value = false,
+	Callback = function(state)
+		pcall(function()
+			Window:ToggleTransparency(state)
+		end)
+	end,
+})
+
+addSaved(ConfigTab, "Keybind", "ToggleKey", {
+	Title = "Tecla para abrir/cerrar",
+	Value = "RightControl",
+	Callback = function(key)
+		local name = typeof(key) == "EnumItem" and key.Name or key
+		pcall(function()
+			Window:SetToggleKey(Enum.KeyCode[name])
+		end)
+	end,
+})
+
+local function hasFileApi()
+	return typeof(writefile) == "function" and typeof(readfile) == "function" and typeof(isfile) == "function"
+end
+
+local function applyConfigValue(key, value)
+	local entry = ConfigEntries[key]
+	if not entry or value == nil then
+		return
+	end
+	local element = entry.Element
+	ConfigState[key] = nil
+	if element then
+		if entry.Kind == "Dropdown" then
+			pcall(function()
+				element:Select(value)
+			end)
+		else
+			pcall(function()
+				element:Set(value)
+			end)
+		end
+	end
+	if ConfigState[key] ~= value then
+		pcall(entry.Callback, value)
+	end
+end
+
+ConfigTab:Button({
+	Title = "Guardar Configuración",
+	Callback = function()
+		if not hasFileApi() then
+			notify("Configuración", "Tu executor no soporta writefile/readfile")
+			return
+		end
+		local ok, err = pcall(function()
+			if typeof(isfolder) == "function" and typeof(makefolder) == "function" and not isfolder(ConfigFolder) then
+				makefolder(ConfigFolder)
+			end
+			local data = {}
+			for _, key in ipairs(ConfigOrder) do
+				data[key] = ConfigState[key]
+			end
+			writefile(ConfigPath, HttpService:JSONEncode({ Version = 1, Values = data }))
+		end)
+		if ok then
+			notify("Configuración", "Configuración guardada")
+		else
+			notify("Configuración", "Error al guardar: " .. tostring(err))
+		end
+	end,
+})
+
+ConfigTab:Button({
+	Title = "Cargar configuración",
+	Callback = function()
+		if not hasFileApi() then
+			notify("Configuración", "Tu executor no soporta writefile/readfile")
+			return
+		end
+		if not isfile(ConfigPath) then
+			notify("Configuración", "No hay ninguna configuración guardada")
+			return
+		end
+		local ok, decoded = pcall(function()
+			return HttpService:JSONDecode(readfile(ConfigPath))
+		end)
+		if not ok or typeof(decoded) ~= "table" or typeof(decoded.Values) ~= "table" then
+			notify("Configuración", "El archivo de configuración está dañado")
+			return
+		end
+		for _, key in ipairs(ConfigOrder) do
+			applyConfigValue(key, decoded.Values[key])
+		end
+		notify("Configuración", "Configuración cargada")
+	end,
+})
+
+ConfigTab:Button({
+	Title = "Borrar Configuración",
+	Callback = function()
+		if typeof(isfile) ~= "function" or typeof(delfile) ~= "function" then
+			notify("Configuración", "Tu executor no soporta delfile")
+			return
+		end
+		if not isfile(ConfigPath) then
+			notify("Configuración", "No hay ninguna configuración guardada")
+			return
+		end
+		local ok, err = pcall(delfile, ConfigPath)
+		if ok then
+			notify("Configuración", "Configuración borrada")
+		else
+			notify("Configuración", "Error al borrar: " .. tostring(err))
+		end
+	end,
+})
+
+InfoTab:Paragraph({
+	Title = "Versión de la GUI: 0.0",
+})
+
+InfoTab:Paragraph({
+	Title = "Copyright: Gerardo Villa Ruiz-Núcleo Blox",
+})
