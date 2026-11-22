@@ -1,0 +1,797 @@
+local windSources = {
+    "https://github.com/Footagesus/WindUI/releases/latest/download/main.lua",
+    "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua",
+    "https://cdn.jsdelivr.net/gh/Footagesus/WindUI@main/dist/main.lua",
+}
+
+local WindUI
+local loadErrors = {}
+for _, url in ipairs(windSources) do
+    local ok, result = pcall(function()
+        local src = game:HttpGet(url)
+        local fn, err = loadstring(src)
+        if not fn then error(err) end
+        return fn()
+    end)
+    if ok and type(result) == "table" then
+        WindUI = result
+        break
+    end
+    table.insert(loadErrors, url .. " -> " .. tostring(result))
+end
+
+if not WindUI then
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "XAiK",
+            Text = "No se pudo cargar WindUI. Revisa la consola (F9).",
+            Duration = 10,
+        })
+    end)
+    warn("XAiK: no se pudo cargar WindUI\n" .. table.concat(loadErrors, "\n"))
+    return
+end
+
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local LocalPlayer = Players.LocalPlayer
+
+local providers = {
+    Claude = { url = "https://api.anthropic.com/v1/messages", model = "claude-opus-5-5" },
+    OpenAI = { url = "https://api.openai.com/v1/chat/completions", model = "gpt-4o" },
+    Google = { url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent", model = "gemini-2.0-flash" },
+    DeepSeek = { url = "https://api.deepseek.com/v1/chat/completions", model = "deepseek-chat" },
+    Nvidia = { url = "https://integrate.api.nvidia.com/v1/chat/completions", model = "moonshotai/kimi-k3.1-pro" },
+}
+local providerNames = { "Claude", "OpenAI", "Google", "DeepSeek", "Nvidia" }
+
+local function detectProvider(key)
+    if key:sub(1, 6) == "nvapi-" then return "Nvidia" end
+    if key:sub(1, 7) == "sk-ant-" then return "Claude" end
+    if key:sub(1, 4) == "AIza" then return "Google" end
+    return nil
+end
+
+local configPath = "XAiK/config.json"
+local config = { apiKey = "", provider = "Claude", model = "", allowScan = true, autoExec = true }
+
+pcall(function()
+    if isfile and isfile(configPath) then
+        local data = HttpService:JSONDecode(readfile(configPath))
+        for k, v in pairs(data) do config[k] = v end
+    end
+end)
+
+local function saveConfig()
+    pcall(function()
+        if makefolder and not (isfolder and isfolder("XAiK")) then makefolder("XAiK") end
+        if writefile then writefile(configPath, HttpService:JSONEncode(config)) end
+    end)
+end
+
+local Window = WindUI:CreateWindow({
+    Title = "XAiK",
+    Icon = "brain",
+    Author = "Asistente IA para Roblox",
+    Folder = "XAiK",
+    Size = UDim2.fromOffset(560, 440),
+    Transparent = true,
+    Theme = "Dark",
+    SideBarWidth = 170,
+    HasOutline = true,
+})
+
+pcall(function()
+    Window:EditOpenButton({
+        Title = "XAiK",
+        Icon = "brain",
+        CornerRadius = UDim.new(0, 16),
+        StrokeThickness = 2,
+        Color = ColorSequence.new(Color3.fromHex("#7C5CFF"), Color3.fromHex("#3BA7FF")),
+        Draggable = true,
+    })
+end)
+
+local ChatTab = Window:Tab({ Title = "Chat", Icon = "message-circle" })
+local ConfigTab = Window:Tab({ Title = "XAiK Configuration", Icon = "settings" })
+
+local knownProps = {
+    "Value", "WalkSpeed", "JumpPower", "JumpHeight", "UseJumpPower", "Health", "MaxHealth", "HipHeight",
+    "AutoRotate", "PlatformStand", "Sit", "DisplayName", "RigType", "Position", "Size", "Orientation",
+    "Anchored", "CanCollide", "CanTouch", "Transparency", "Color", "Material", "Massless", "Text",
+    "Visible", "Enabled", "Disabled", "Gravity", "FallenPartsDestroyHeight", "ClockTime", "Brightness",
+    "FieldOfView", "CameraType", "MaxActivationDistance", "HoldDuration", "ActionText", "ToolTip",
+    "RequiresHandle", "Team", "TeamColor", "Neutral", "UserId", "SoundId", "Volume", "Playing",
+    "MeshId", "TextureID", "Image", "PrimaryPart", "Archivable", "RunContext",
+}
+
+local keywordMap = {
+    velocidad = { "WalkSpeed", "speed" }, rapido = { "WalkSpeed", "speed" }, ["rápido"] = { "WalkSpeed", "speed" },
+    correr = { "WalkSpeed", "speed", "run", "sprint" }, salto = { "JumpPower", "JumpHeight", "jump" },
+    saltar = { "JumpPower", "JumpHeight", "jump" }, vida = { "Health", "MaxHealth", "health" },
+    salud = { "Health", "MaxHealth" }, gravedad = { "Gravity" }, dinero = { "money", "cash", "coins", "leaderstats" },
+    monedas = { "coins", "cash", "money", "leaderstats" }, arma = { "Tool", "weapon", "gun" },
+    ["tamaño"] = { "Size", "BodyHeightScale" }, invisible = { "Transparency" }, puerta = { "door" },
+    tienda = { "shop", "store" }, nivel = { "level", "xp", "leaderstats" },
+}
+
+local function fmt(v)
+    local t = typeof(v)
+    if t == "Instance" then return v:GetFullName() end
+    if t == "Vector3" then return string.format("Vector3(%.2f, %.2f, %.2f)", v.X, v.Y, v.Z) end
+    if t == "Color3" then return string.format("Color3(%d, %d, %d)", math.floor(v.R * 255), math.floor(v.G * 255), math.floor(v.B * 255)) end
+    if t == "string" then return '"' .. v:sub(1, 120) .. '"' end
+    return tostring(v)
+end
+
+local function getProps(inst)
+    local out = {}
+    for _, p in ipairs(knownProps) do
+        local ok, val = pcall(function() return inst[p] end)
+        if ok and val ~= nil and typeof(val) ~= "RBXScriptSignal" and typeof(val) ~= "function" then
+            table.insert(out, p .. "=" .. fmt(val))
+        end
+    end
+    pcall(function()
+        for k, v in pairs(inst:GetAttributes()) do
+            table.insert(out, "@" .. k .. "=" .. fmt(v))
+        end
+    end)
+    return out
+end
+
+local function resolvePath(path)
+    path = path:gsub("^%s+", ""):gsub("%s+$", ""):gsub("/", ".")
+    local parts = {}
+    for seg in path:gmatch("[^%.]+") do table.insert(parts, seg) end
+    local cur = game
+    local i = 1
+    if parts[1] == "game" then i = 2 end
+    local first = parts[i]
+    if first == "LocalPlayer" then
+        cur = LocalPlayer
+        i = i + 1
+    elseif first == "Character" then
+        cur = LocalPlayer.Character
+        i = i + 1
+    elseif first == "workspace" then
+        cur = workspace
+        i = i + 1
+    end
+    while cur and i <= #parts do
+        local name = parts[i]
+        local nxt = cur:FindFirstChild(name)
+        if not nxt and cur == game then
+            pcall(function() nxt = game:GetService(name) end)
+        end
+        cur = nxt
+        i = i + 1
+    end
+    return cur
+end
+
+local function inspect(path)
+    local inst = resolvePath(path)
+    if not inst then return "No existe: " .. path end
+    local lines = { inst:GetFullName() .. " [" .. inst.ClassName .. "]" }
+    local props = getProps(inst)
+    if #props > 0 then table.insert(lines, "Propiedades: " .. table.concat(props, ", ")) end
+    if inst:IsA("LuaSourceContainer") then
+        local src
+        pcall(function() src = decompile and decompile(inst) end)
+        table.insert(lines, src and ("Código:\n" .. src:sub(1, 3000)) or "Código: (decompile no disponible)")
+    end
+    local kids = inst:GetChildren()
+    if #kids > 0 then
+        table.insert(lines, "Hijos (" .. #kids .. "):")
+        for idx, c in ipairs(kids) do
+            if idx > 40 then table.insert(lines, "  ...") break end
+            local cp = getProps(c)
+            table.insert(lines, "  " .. c.Name .. " [" .. c.ClassName .. "]" .. (#cp > 0 and (" " .. table.concat(cp, ", "):sub(1, 150)) or ""))
+        end
+    end
+    return table.concat(lines, "\n")
+end
+
+local function searchGame(query)
+    local terms = {}
+    local q = query:lower()
+    table.insert(terms, q)
+    for word in q:gmatch("[%wáéíóúñ]+") do
+        if keywordMap[word] then
+            for _, t in ipairs(keywordMap[word]) do table.insert(terms, t:lower()) end
+        end
+    end
+    local matches, seen = {}, {}
+    local function add(inst, reason)
+        if seen[inst] or #matches >= 50 then return end
+        seen[inst] = true
+        local props = getProps(inst)
+        table.insert(matches, inst:GetFullName() .. " [" .. inst.ClassName .. "] (" .. reason .. ")" .. (#props > 0 and (" " .. table.concat(props, ", "):sub(1, 200)) or ""))
+    end
+    local function check(inst)
+        local name = inst.Name:lower()
+        local cls = inst.ClassName:lower()
+        for _, t in ipairs(terms) do
+            if name:find(t, 1, true) then add(inst, "nombre") return end
+            if cls:find(t, 1, true) then add(inst, "clase") return end
+            for _, p in ipairs(knownProps) do
+                if p:lower() == t then
+                    local ok, v = pcall(function() return inst[p] end)
+                    if ok and v ~= nil then add(inst, "propiedad " .. p) return end
+                end
+            end
+            local okA, attrs = pcall(function() return inst:GetAttributes() end)
+            if okA then
+                for k in pairs(attrs) do
+                    if k:lower():find(t, 1, true) then add(inst, "atributo " .. k) return end
+                end
+            end
+        end
+    end
+    local roots = { workspace, game:GetService("ReplicatedStorage"), game:GetService("ReplicatedFirst"), game:GetService("Lighting"), game:GetService("StarterGui"), game:GetService("StarterPack"), game:GetService("StarterPlayer"), Players }
+    for _, root in ipairs(roots) do
+        pcall(function()
+            for _, d in ipairs(root:GetDescendants()) do
+                if #matches >= 50 then break end
+                pcall(check, d)
+            end
+        end)
+    end
+    if #matches == 0 then return "Sin resultados para: " .. query .. " (términos probados: " .. table.concat(terms, ", ") .. ")" end
+    return table.concat(matches, "\n")
+end
+
+local function listRemotes()
+    local out = {}
+    for _, d in ipairs(game:GetDescendants()) do
+        local ok, isRemote = pcall(function()
+            return d:IsA("RemoteEvent") or d:IsA("RemoteFunction") or d:IsA("UnreliableRemoteEvent")
+        end)
+        if ok and isRemote then
+            table.insert(out, d:GetFullName() .. " [" .. d.ClassName .. "]")
+            if #out >= 150 then break end
+        end
+    end
+    return #out > 0 and table.concat(out, "\n") or "No se encontraron remotes."
+end
+
+local function playerContext()
+    local lines = { "Jugador: " .. LocalPlayer.Name .. " (UserId " .. LocalPlayer.UserId .. ")" }
+    local char = LocalPlayer.Character
+    if char then
+        table.insert(lines, "Character: " .. char:GetFullName())
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then table.insert(lines, "Humanoid: " .. hum:GetFullName() .. " | " .. table.concat(getProps(hum), ", ")) end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then table.insert(lines, "HumanoidRootPart.Position=" .. fmt(root.Position)) end
+    end
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    if ls then
+        for _, s in ipairs(ls:GetChildren()) do
+            table.insert(lines, "leaderstats." .. s.Name .. " = " .. fmt(s.Value))
+        end
+    end
+    pcall(function()
+        for k, v in pairs(LocalPlayer:GetAttributes()) do table.insert(lines, "LocalPlayer@" .. k .. "=" .. fmt(v)) end
+    end)
+    table.insert(lines, "workspace.Gravity=" .. workspace.Gravity)
+    return table.concat(lines, "\n")
+end
+
+local function runCode(code)
+    local fn, compileErr = loadstring(code)
+    if not fn then return false, "Error de compilación: " .. tostring(compileErr) end
+    local output = {}
+    local env = setmetatable({
+        print = function(...)
+            local t = {}
+            for i = 1, select("#", ...) do t[i] = tostring(select(i, ...)) end
+            table.insert(output, table.concat(t, " "))
+        end,
+        warn = function(...)
+            local t = {}
+            for i = 1, select("#", ...) do t[i] = tostring(select(i, ...)) end
+            table.insert(output, "WARN: " .. table.concat(t, " "))
+        end,
+    }, { __index = getfenv() })
+    pcall(setfenv, fn, env)
+    local results
+    task.spawn(function()
+        results = table.pack(pcall(fn))
+    end)
+    local waited = 0
+    while not results and waited < 3 do
+        waited = waited + task.wait()
+    end
+    if not results then
+        local msg = "Ejecutándose en segundo plano (el script sigue activo con bucles o esperas)."
+        if #output > 0 then msg = msg .. "\nSalida:\n" .. table.concat(output, "\n") end
+        return true, msg
+    end
+    if not results[1] then
+        return false, "Error en ejecución: " .. tostring(results[2]) .. (#output > 0 and ("\nSalida:\n" .. table.concat(output, "\n")) or "")
+    end
+    local ret = {}
+    for i = 2, results.n do table.insert(ret, fmt(results[i])) end
+    local msg = "Ejecutado correctamente."
+    if #output > 0 then msg = msg .. "\nSalida:\n" .. table.concat(output, "\n") end
+    if #ret > 0 then msg = msg .. "\nRetorno: " .. table.concat(ret, ", ") end
+    return true, msg
+end
+
+local systemPrompt = [=[Eres XAiK, un agente dentro de un script de Roblox ejecutado en un executor como Arceus X o Delta (cliente). Hablas español.
+Tienes HERRAMIENTAS. Para usarlas escribe exactamente estas etiquetas en tu respuesta:
+[[buscar: texto]]  busca instancias por nombre, clase, propiedad o atributo (ej: [[buscar: WalkSpeed]], [[buscar: coins]]).
+[[inspeccionar: ruta]]  muestra propiedades, atributos, hijos y código de una instancia (ej: [[inspeccionar: Character.Humanoid]], [[inspeccionar: game.ReplicatedStorage.Remotes]]).
+[[remotes]]  lista todos los RemoteEvents/RemoteFunctions.
+```lua
+codigo
+```  el código Luau en un bloque lua se EJECUTA en el cliente y recibirás la salida de print o el error.
+Atajos de ruta: "LocalPlayer", "Character", "workspace", "game.Servicio...".
+Reglas:
+1) Antes de modificar algo, busca o inspecciona primero si no estás seguro de la ruta. Recibirás los resultados en el siguiente mensaje.
+2) Si encuentras lo que el usuario pidió, ejecuta el código para hacerlo (ej: velocidad -> LocalPlayer.Character.Humanoid.WalkSpeed = 50) y confirma con print.
+3) Si no encuentras coincidencia exacta, NO ejecutes; di qué encontraste parecido (rutas completas) y haz preguntas breves y numeradas con opciones, al estilo de Claude.
+4) Ten en cuenta que solo puedes afectar al cliente; los cambios del servidor requieren RemoteEvents.
+5) NUNCA le des scripts al usuario para que los ejecute él ni le digas "copia y pega esto". Tú ejecutas todo el código directamente poniéndolo en un bloque ```lua```; el usuario ya tiene un botón para copiarlo si lo quiere.
+6) Si el usuario pide un script (ej: fly, noclip, ESP, GUI), escríbelo completo en un bloque ```lua``` para que se ejecute de inmediato.
+7) Cuando ya terminaste, responde en texto breve explicando qué hiciste, sin etiquetas ni bloques de código.]=]
+
+local history = {}
+local sendRequest
+local ModelInput
+
+local function getRequest()
+    return (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+end
+
+local function callAPI(content)
+    if config.apiKey == "" then
+        return nil, "Falta la Api-Key. Ve a la pestaña XAiK Configuration."
+    end
+    local req = getRequest()
+    if not req then return nil, "Tu executor no tiene función request." end
+
+    local provider = providers[config.provider] or providers.Claude
+    local model = (config.model ~= "" and config.model) or provider.model
+    table.insert(history, { role = "user", content = content })
+    return sendRequest(req, provider, model, false)
+end
+
+local nvidiaPreferred = {
+    "moonshotai/kimi-k3.1-pro",
+    "mistralai/mistral-large-4-1t-a52b",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "z-ai/glm-5.3-flash",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
+}
+
+local function findNvidiaModel(req, exclude)
+    local ok, res = pcall(req, { Url = "https://integrate.api.nvidia.com/v1/models", Method = "GET", Headers = { ["Authorization"] = "Bearer " .. config.apiKey } })
+    if not ok or not res then return nil end
+    local ok2, data = pcall(HttpService.JSONDecode, HttpService, res.Body or res.body or "")
+    if not ok2 or type(data) ~= "table" or type(data.data) ~= "table" then return nil end
+    local available = {}
+    for _, m in ipairs(data.data) do available[m.id] = true end
+    for _, id in ipairs(nvidiaPreferred) do
+        if available[id] and id ~= exclude then return id end
+    end
+    local skip = { "embed", "guard", "safety", "clip", "detector", "riva", "gliner", "calibration", "retriever", "starcoder", "cosmos" }
+    for _, m in ipairs(data.data) do
+        local bad = m.id == exclude
+        for _, s in ipairs(skip) do
+            if m.id:lower():find(s, 1, true) then bad = true break end
+        end
+        if not bad then return m.id end
+    end
+    return nil
+end
+
+function sendRequest(req, provider, model, retried, maxTokens)
+    maxTokens = maxTokens or 4096
+    local url, body, headers
+    if config.provider == "Claude" then
+        url = provider.url
+        body = HttpService:JSONEncode({ model = model, max_tokens = maxTokens, system = systemPrompt, messages = history })
+        headers = { ["Content-Type"] = "application/json", ["x-api-key"] = config.apiKey, ["anthropic-version"] = "2023-06-01" }
+    elseif config.provider == "Google" then
+        local contents = {}
+        for _, m in ipairs(history) do
+            table.insert(contents, { role = m.role == "assistant" and "model" or "user", parts = { { text = m.content } } })
+        end
+        url = provider.url:gsub("gemini%-2%.0%-flash", model) .. "?key=" .. config.apiKey
+        body = HttpService:JSONEncode({ contents = contents, systemInstruction = { parts = { { text = systemPrompt } } }, generationConfig = { maxOutputTokens = maxTokens } })
+        headers = { ["Content-Type"] = "application/json" }
+    else
+        local msgs = { { role = "system", content = systemPrompt } }
+        for _, m in ipairs(history) do table.insert(msgs, m) end
+        url = provider.url
+        body = HttpService:JSONEncode({ model = model, messages = msgs, max_tokens = maxTokens })
+        headers = { ["Content-Type"] = "application/json", ["Authorization"] = "Bearer " .. config.apiKey }
+    end
+
+    local ok, response = pcall(req, { Url = url, Method = "POST", Headers = headers, Body = body })
+    if not ok or not response then
+        table.remove(history)
+        return nil, "Error de red: " .. tostring(response)
+    end
+
+    local raw = response.Body or response.body or ""
+    local status = tonumber(response.StatusCode or response.statusCode or response.Status) or 0
+
+    if config.provider == "Nvidia" and (status == 404 or status == 410) and not retried then
+        local newModel = findNvidiaModel(req, model)
+        if newModel then
+            config.model = newModel
+            saveConfig()
+            pcall(function() ModelInput:Set(newModel) end)
+            WindUI:Notify({ Title = "XAiK", Content = "Modelo no disponible (" .. model .. "). Usando: " .. newModel, Icon = "refresh-cw", Duration = 6 })
+            return sendRequest(req, provider, newModel, true, maxTokens)
+        end
+    end
+
+    local ok2, parsed = pcall(HttpService.JSONDecode, HttpService, raw)
+    if not ok2 or type(parsed) ~= "table" then
+        table.remove(history)
+        return nil, "HTTP " .. status .. " (" .. config.provider .. ", modelo " .. model .. "): " .. raw:sub(1, 200)
+    end
+
+    local text, finish, reasoning
+    pcall(function()
+        local parts = {}
+        if config.provider == "Claude" then
+            finish = parsed.stop_reason
+            for _, b in ipairs(parsed.content or {}) do
+                if b.type == "text" and type(b.text) == "string" then table.insert(parts, b.text) end
+            end
+        elseif config.provider == "Google" then
+            local cand = parsed.candidates[1]
+            finish = cand.finishReason
+            for _, p in ipairs(cand.content and cand.content.parts or {}) do
+                if type(p.text) == "string" and not p.thought then table.insert(parts, p.text) end
+            end
+        else
+            local choice = parsed.choices[1]
+            finish = choice.finish_reason
+            local msg = choice.message or {}
+            reasoning = msg.reasoning_content or msg.reasoning
+            if type(msg.content) == "string" then
+                table.insert(parts, msg.content)
+            elseif type(msg.content) == "table" then
+                for _, p in ipairs(msg.content) do
+                    if type(p) == "table" and type(p.text) == "string" then table.insert(parts, p.text) end
+                end
+            end
+        end
+        text = table.concat(parts, "\n")
+    end)
+
+    if text then
+        text = text:gsub("<think>.-</think>", ""):gsub("<think>.*$", "")
+        text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    end
+
+    local apiError = parsed.error and (type(parsed.error) == "table" and parsed.error.message or tostring(parsed.error)) or parsed.detail
+
+    if (not text or text == "") and not apiError and maxTokens < 16384 then
+        WindUI:Notify({ Title = "XAiK", Content = "Respuesta vacía, reintentando con más tokens...", Icon = "refresh-cw", Duration = 4 })
+        return sendRequest(req, provider, model, retried, 16384)
+    end
+
+    if not text or text == "" then
+        table.remove(history)
+        if apiError then
+            return nil, "[API " .. status .. "] " .. tostring(apiError)
+        end
+        local hint = ""
+        if finish == "length" or finish == "max_tokens" or finish == "MAX_TOKENS" then
+            hint = " El modelo agotó los tokens razonando; prueba otro modelo o un mensaje más corto."
+        elseif finish == "SAFETY" or finish == "content_filter" then
+            hint = " La respuesta fue bloqueada por el filtro del proveedor."
+        elseif reasoning then
+            hint = " El modelo solo devolvió razonamiento interno."
+        end
+        return nil, "[API " .. status .. "] Respuesta vacía (fin: " .. tostring(finish) .. ")." .. hint
+    end
+
+    table.insert(history, { role = "assistant", content = text })
+    return text
+end
+
+local function addMessage(role, text, buttons)
+    local isUser = role == "user"
+    local title = isUser and (LocalPlayer and LocalPlayer.DisplayName or "Tú") or (role == "tool" and "XAiK · herramienta" or "XAiK")
+    return ChatTab:Paragraph({
+        Title = title,
+        Desc = text,
+        Image = isUser and "user" or (role == "tool" and "wrench" or "brain"),
+        ImageSize = 20,
+        Color = isUser and "Blue" or nil,
+        Buttons = buttons,
+    })
+end
+
+local codeLangs = { [""] = true, lua = true, luau = true, rbxlua = true, roblox = true }
+
+local function isCodeBlock(lang)
+    return codeLangs[(lang or ""):lower()] == true
+end
+
+local function parseTools(text)
+    local tools = {}
+    for q in text:gmatch("%[%[%s*buscar%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "buscar", arg = q }) end
+    for p in text:gmatch("%[%[%s*inspeccionar%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "inspeccionar", arg = p }) end
+    if text:find("%[%[%s*remotes%s*%]%]") then table.insert(tools, { kind = "remotes" }) end
+    for lang, code in text:gmatch("```([%w_]*)[^\n]*\n(.-)```") do
+        if isCodeBlock(lang) and code:find("%S") then
+            table.insert(tools, { kind = "ejecutar", arg = code })
+        end
+    end
+    return tools
+end
+
+local function cleanText(text)
+    local t = text:gsub("%[%[.-%]%]", "")
+    t = t:gsub("```([%w_]*)([^\n]*\n.-)```", function(lang, rest)
+        if isCodeBlock(lang) then return "" end
+        return "```" .. lang .. rest .. "```"
+    end)
+    return (t:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function copyText(s)
+    local setter = setclipboard or toclipboard or set_clipboard or (Clipboard and Clipboard.set)
+    if setter and pcall(setter, s) then
+        WindUI:Notify({ Title = "XAiK", Content = "Script copiado al portapapeles.", Icon = "clipboard-check", Duration = 3 })
+    else
+        WindUI:Notify({ Title = "XAiK", Content = "Tu executor no permite copiar al portapapeles.", Icon = "triangle-alert", Duration = 4 })
+    end
+end
+
+local function copyButton(code)
+    return {
+        Title = "Copiar script",
+        Icon = "copy",
+        Callback = function() copyText(code) end,
+    }
+end
+
+local processing = false
+local currentMessage = ""
+local MessageInput
+
+local function agentLoop(userText)
+    local thinking = addMessage("ai", "Pensando...")
+    local content = userText
+    if config.allowScan then
+        content = "[Contexto del jugador]\n" .. playerContext() .. "\n\n[Mensaje del usuario]\n" .. userText
+    end
+
+    for step = 1, 8 do
+        local reply, err = callAPI(content)
+        if not reply then
+            pcall(function() thinking:SetDesc("Error: " .. tostring(err)) end)
+            WindUI:Notify({ Title = "XAiK", Content = tostring(err), Icon = "triangle-alert", Duration = 5 })
+            return
+        end
+
+        local tools = parseTools(reply)
+        local visible = cleanText(reply)
+
+        if #tools == 0 then
+            pcall(function() thinking:SetDesc(visible ~= "" and visible or reply) end)
+            return
+        end
+
+        if visible ~= "" then
+            pcall(function() thinking:SetDesc(visible) end)
+        else
+            pcall(function() thinking:SetDesc("Trabajando...") end)
+        end
+
+        local results = {}
+        local pendingCode = {}
+        for _, tool in ipairs(tools) do
+            if tool.kind == "buscar" then
+                if config.allowScan then
+                    addMessage("tool", "Buscando: " .. tool.arg)
+                    table.insert(results, "[buscar: " .. tool.arg .. "]\n" .. searchGame(tool.arg):sub(1, 5000))
+                else
+                    table.insert(results, "[buscar] El escaneo está desactivado por el usuario.")
+                end
+            elseif tool.kind == "inspeccionar" then
+                if config.allowScan then
+                    addMessage("tool", "Inspeccionando: " .. tool.arg)
+                    table.insert(results, "[inspeccionar: " .. tool.arg .. "]\n" .. inspect(tool.arg):sub(1, 5000))
+                else
+                    table.insert(results, "[inspeccionar] El escaneo está desactivado por el usuario.")
+                end
+            elseif tool.kind == "remotes" then
+                addMessage("tool", "Listando RemoteEvents y RemoteFunctions")
+                table.insert(results, "[remotes]\n" .. listRemotes():sub(1, 5000))
+            elseif tool.kind == "ejecutar" then
+                if config.autoExec then
+                    local code = tool.arg
+                    local ok, out = runCode(code)
+                    addMessage("tool", (ok and "Script ejecutado\n" or "Fallo al ejecutar\n") .. out:sub(1, 500), { copyButton(code) })
+                    table.insert(results, "[ejecutar]\n" .. out:sub(1, 3000))
+                else
+                    table.insert(pendingCode, tool.arg)
+                end
+            end
+        end
+
+        for _, code in ipairs(pendingCode) do
+            addMessage("tool", "Script listo (ejecución automática desactivada)", {
+                {
+                    Title = "Ejecutar",
+                    Icon = "play",
+                    Callback = function()
+                        task.spawn(function()
+                            local ok, out = runCode(code)
+                            WindUI:Notify({ Title = "XAiK", Content = out:sub(1, 120), Icon = ok and "check" or "triangle-alert", Duration = 5 })
+                        end)
+                    end,
+                },
+                copyButton(code),
+            })
+        end
+
+        if #results == 0 then return end
+
+        thinking = addMessage("ai", "Analizando resultados...")
+        content = "[Resultados de herramientas]\n" .. table.concat(results, "\n\n")
+    end
+    pcall(function() thinking:SetDesc("Se alcanzó el límite de pasos. Pide que continúe si hace falta.") end)
+end
+
+local function sendMessage()
+    if processing then
+        WindUI:Notify({ Title = "XAiK", Content = "Espera la respuesta anterior.", Icon = "loader", Duration = 3 })
+        return
+    end
+    local text = currentMessage
+    if text == "" then return end
+    currentMessage = ""
+    pcall(function() MessageInput:Set("") end)
+    addMessage("user", text)
+    processing = true
+    task.spawn(function()
+        local ok, err = pcall(agentLoop, text)
+        if not ok then addMessage("ai", "Error interno: " .. tostring(err)) end
+        processing = false
+    end)
+end
+
+ChatTab:Section({ Title = "Conversación" })
+
+MessageInput = ChatTab:Input({
+    Title = "Mensaje",
+    Placeholder = "Ingresa tu mensaje",
+    Value = "",
+    Type = "Input",
+    Icon = "message-square",
+    Callback = function(text)
+        currentMessage = text
+    end,
+})
+
+ChatTab:Button({
+    Title = "Enviar",
+    Icon = "send",
+    Callback = sendMessage,
+})
+
+ChatTab:Button({
+    Title = "Nueva conversación",
+    Icon = "rotate-ccw",
+    Callback = function()
+        history = {}
+        WindUI:Notify({ Title = "XAiK", Content = "Historial borrado.", Icon = "check", Duration = 3 })
+    end,
+})
+
+addMessage("ai", "Hola, soy XAiK. Configura tu Api-Key en la pestaña XAiK Configuration. Puedo buscar en el juego, leer propiedades y valores, ver RemoteEvents y ejecutar código. Prueba: \"pon mi velocidad en 50\".")
+
+ConfigTab:Section({ Title = "Inteligencia Artificial" })
+
+local ProviderDropdown
+
+ConfigTab:Input({
+    Title = "Api-Key",
+    Placeholder = "Ingresa la Api-Key de la inteligencia artificial...",
+    Value = config.apiKey,
+    Type = "Input",
+    Icon = "key-round",
+    Callback = function(text)
+        text = text:gsub("^%s+", ""):gsub("%s+$", "")
+        config.apiKey = text
+        local detected = detectProvider(text)
+        if detected and detected ~= config.provider then
+            config.provider = detected
+            history = {}
+            pcall(function() ProviderDropdown:Select(detected) end)
+            WindUI:Notify({ Title = "XAiK", Content = "Proveedor detectado: " .. detected, Icon = "check", Duration = 4 })
+        end
+        saveConfig()
+    end,
+})
+
+ProviderDropdown = ConfigTab:Dropdown({
+    Title = "Proveedor",
+    Values = providerNames,
+    Value = config.provider,
+    Callback = function(option)
+        config.provider = type(option) == "table" and option[1] or option
+        history = {}
+        saveConfig()
+    end,
+})
+
+ModelInput = ConfigTab:Input({
+    Title = "Modelo (opcional)",
+    Desc = "Vacío = modelo por defecto del proveedor",
+    Placeholder = "ej: claude-opus-5-5, gpt-4o, moonshotai/kimi-k3.1-pro",
+    Value = config.model,
+    Type = "Input",
+    Icon = "cpu",
+    Callback = function(text)
+        config.model = text
+        saveConfig()
+    end,
+})
+
+ConfigTab:Section({ Title = "Juego" })
+
+ConfigTab:Toggle({
+    Title = "Permitir escaneo del juego",
+    Desc = "Buscar instancias, leer propiedades, valores, código y RemoteEvents",
+    Icon = "scan-search",
+    Value = config.allowScan,
+    Callback = function(state)
+        config.allowScan = state
+        saveConfig()
+    end,
+})
+
+ConfigTab:Toggle({
+    Title = "Ejecutar código automáticamente",
+    Desc = "Si está apagado, la IA propone el código y tú pulsas Ejecutar",
+    Icon = "play",
+    Value = config.autoExec,
+    Callback = function(state)
+        config.autoExec = state
+        saveConfig()
+    end,
+})
+
+ConfigTab:Button({
+    Title = "Probar conexión",
+    Icon = "plug-zap",
+    Callback = function()
+        task.spawn(function()
+            local saved = history
+            history = {}
+            local reply, err = callAPI("Responde solo: OK")
+            history = saved
+            WindUI:Notify({
+                Title = "XAiK",
+                Content = reply and ("Conectado: " .. reply:sub(1, 60)) or tostring(err),
+                Icon = reply and "check" or "triangle-alert",
+                Duration = 5,
+            })
+        end)
+    end,
+})
+
+ConfigTab:Dropdown({
+    Title = "Tema",
+    Values = { "Dark", "Light", "Rose", "Plant", "Red", "Indigo", "Sky", "Violet", "Amber", "Emerald", "Midnight" },
+    Value = "Dark",
+    Callback = function(theme)
+        pcall(function() WindUI:SetTheme(type(theme) == "table" and theme[1] or theme) end)
+    end,
+})
+
+pcall(function() Window:SelectTab(1) end)
