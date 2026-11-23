@@ -42,10 +42,12 @@ local providers = {
     Google = { url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent", model = "gemini-2.0-flash" },
     DeepSeek = { url = "https://api.deepseek.com/v1/chat/completions", model = "deepseek-chat" },
     Nvidia = { url = "https://integrate.api.nvidia.com/v1/chat/completions", model = "moonshotai/kimi-k3.1-pro" },
+    Groq = { url = "https://api.groq.com/openai/v1/chat/completions", model = "qwen/qwen3.8-27b" },
 }
-local providerNames = { "Claude", "OpenAI", "Google", "DeepSeek", "Nvidia" }
+local providerNames = { "Claude", "OpenAI", "Google", "DeepSeek", "Nvidia", "Groq" }
 
 local function detectProvider(key)
+    if key:sub(1, 4) == "gsk_" then return "Groq" end
     if key:sub(1, 6) == "nvapi-" then return "Nvidia" end
     if key:sub(1, 7) == "sk-ant-" then return "Claude" end
     if key:sub(1, 4) == "AIza" then return "Google" end
@@ -341,6 +343,7 @@ Reglas:
 local history = {}
 local sendRequest
 local ModelInput
+local setProvider
 
 local function getRequest()
     return (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
@@ -407,7 +410,11 @@ function sendRequest(req, provider, model, retried, maxTokens)
         local msgs = { { role = "system", content = systemPrompt } }
         for _, m in ipairs(history) do table.insert(msgs, m) end
         url = provider.url
-        body = HttpService:JSONEncode({ model = model, messages = msgs, max_tokens = maxTokens })
+        local payload = { model = model, messages = msgs, max_tokens = maxTokens }
+        if config.provider == "Groq" and model:lower():find("qwen", 1, true) then
+            payload.reasoning_format = "hidden"
+        end
+        body = HttpService:JSONEncode(payload)
         headers = { ["Content-Type"] = "application/json", ["Authorization"] = "Bearer " .. config.apiKey }
     end
 
@@ -698,6 +705,14 @@ ConfigTab:Section({ Title = "Inteligencia Artificial" })
 
 local ProviderDropdown
 
+function setProvider(name)
+    if name == config.provider then return end
+    config.provider = name
+    config.model = ""
+    history = {}
+    pcall(function() ModelInput:Set("") end)
+end
+
 ConfigTab:Input({
     Title = "Api-Key",
     Placeholder = "Ingresa la Api-Key de la inteligencia artificial...",
@@ -709,8 +724,7 @@ ConfigTab:Input({
         config.apiKey = text
         local detected = detectProvider(text)
         if detected and detected ~= config.provider then
-            config.provider = detected
-            history = {}
+            setProvider(detected)
             pcall(function() ProviderDropdown:Select(detected) end)
             WindUI:Notify({ Title = "XAiK", Content = "Proveedor detectado: " .. detected, Icon = "check", Duration = 4 })
         end
@@ -723,8 +737,7 @@ ProviderDropdown = ConfigTab:Dropdown({
     Values = providerNames,
     Value = config.provider,
     Callback = function(option)
-        config.provider = type(option) == "table" and option[1] or option
-        history = {}
+        setProvider(type(option) == "table" and option[1] or option)
         saveConfig()
     end,
 })
@@ -732,7 +745,7 @@ ProviderDropdown = ConfigTab:Dropdown({
 ModelInput = ConfigTab:Input({
     Title = "Modelo (opcional)",
     Desc = "Vacío = modelo por defecto del proveedor",
-    Placeholder = "ej: claude-opus-5-5, gpt-4o, moonshotai/kimi-k3.1-pro",
+    Placeholder = "ej: qwen/qwen3.8-27b, claude-opus-5-5, moonshotai/kimi-k3.1-pro",
     Value = config.model,
     Type = "Input",
     Icon = "cpu",
