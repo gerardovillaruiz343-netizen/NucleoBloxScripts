@@ -55,7 +55,7 @@ local function detectProvider(key)
 end
 
 local configPath = "XAiK/config.json"
-local config = { apiKey = "", provider = "Claude", model = "", allowScan = true, autoExec = true }
+local config = { apiKey = "", provider = "Claude", model = "", allowScan = true, autoExec = true, perf = "Bajo" }
 
 pcall(function()
     if isfile and isfile(configPath) then
@@ -173,6 +173,59 @@ local function resolvePath(path)
     return cur
 end
 
+local perfPresets = {
+    Bajo = { nodes = 12000, decompile = 25, budget = 0.004, maxTools = 4, cacheChars = 600000 },
+    Medio = { nodes = 35000, decompile = 70, budget = 0.007, maxTools = 6, cacheChars = 1500000 },
+    Alto = { nodes = 90000, decompile = 160, budget = 0.012, maxTools = 8, cacheChars = 3000000 },
+}
+
+local function perf()
+    return perfPresets[config.perf] or perfPresets.Bajo
+end
+
+local lastYield = os.clock()
+local function breathe()
+    if os.clock() - lastYield > perf().budget then
+        task.wait()
+        lastYield = os.clock()
+    end
+end
+
+local skipServices = {
+    CoreGui = true, CorePackages = true, RobloxReplicatedStorage = true, RobloxPluginGuiService = true,
+    PluginGuiService = true, PluginDebugService = true, TestService = true, Chat = true,
+}
+
+local function isCoreInstance(inst)
+    local ok, full = pcall(function() return inst:GetFullName() end)
+    if not ok then return true end
+    local top = full:match("^([^%.]+)")
+    return top ~= nil and skipServices[top] == true
+end
+
+local function walk(root, visit, maxNodes)
+    maxNodes = maxNodes or perf().nodes
+    local stack = { root }
+    local count = 0
+    while #stack > 0 do
+        local inst = table.remove(stack)
+        local ok, children = pcall(function() return inst:GetChildren() end)
+        if ok then
+            for _, c in ipairs(children) do
+                local skip = inst == game and skipServices[c.Name]
+                if not skip then
+                    count = count + 1
+                    if count > maxNodes then return count, true end
+                    if visit(c) then return count, false end
+                    stack[#stack + 1] = c
+                    breathe()
+                end
+            end
+        end
+    end
+    return count, false
+end
+
 local function inspect(path)
     local inst = resolvePath(path)
     if not inst then return "No existe: " .. path end
@@ -233,29 +286,33 @@ local function searchGame(query)
         end
     end
     local roots = { workspace, game:GetService("ReplicatedStorage"), game:GetService("ReplicatedFirst"), game:GetService("Lighting"), game:GetService("StarterGui"), game:GetService("StarterPack"), game:GetService("StarterPlayer"), Players }
+    local budget = perf().nodes
+    local truncated = false
     for _, root in ipairs(roots) do
-        pcall(function()
-            for _, d in ipairs(root:GetDescendants()) do
-                if #matches >= 50 then break end
-                pcall(check, d)
-            end
-        end)
+        if #matches >= 50 or budget <= 0 then break end
+        local used, cut = walk(root, function(d)
+            pcall(check, d)
+            return #matches >= 50
+        end, budget)
+        budget = budget - used
+        truncated = truncated or cut
     end
-    if #matches == 0 then return "Sin resultados para: " .. query .. " (términos probados: " .. table.concat(terms, ", ") .. ")" end
-    return table.concat(matches, "\n")
+    local note = (truncated or budget <= 0) and "\n(Búsqueda recortada por el límite de rendimiento.)" or ""
+    if #matches == 0 then return "Sin resultados para: " .. query .. " (términos probados: " .. table.concat(terms, ", ") .. ")" .. note end
+    return table.concat(matches, "\n") .. note
 end
 
 local function listRemotes()
     local out = {}
-    for _, d in ipairs(game:GetDescendants()) do
+    walk(game, function(d)
         local ok, isRemote = pcall(function()
             return d:IsA("RemoteEvent") or d:IsA("RemoteFunction") or d:IsA("UnreliableRemoteEvent")
         end)
         if ok and isRemote then
             table.insert(out, d:GetFullName() .. " [" .. d.ClassName .. "]")
-            if #out >= 150 then break end
         end
-    end
+        return #out >= 150
+    end)
     return #out > 0 and table.concat(out, "\n") or "No se encontraron remotes."
 end
 
@@ -308,13 +365,12 @@ local function characterReport()
         end)
     end
     table.insert(lines, "=== Contenido del personaje ===")
-    local count = 0
-    for _, d in ipairs(char:GetDescendants()) do
-        count = count + 1
-        if count > 220 then table.insert(lines, "...") break end
+    local _, cut = walk(char, function(d)
         local p = getProps(d)
         table.insert(lines, d:GetFullName() .. " [" .. d.ClassName .. "]" .. (#p > 0 and (" " .. table.concat(p, ", "):sub(1, 160)) or ""))
-    end
+        return false
+    end, 220)
+    if cut then table.insert(lines, "...") end
     local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
     if bp then
         local tools = {}
@@ -344,20 +400,36 @@ local function characterReport()
     return table.concat(lines, "\n")
 end
 
+local scriptListCache, scriptListTime = nil, 0
+
 local function allScripts()
+    if scriptListCache and os.clock() - scriptListTime < 30 then return scriptListCache end
     local list, seen = {}, {}
     local function add(s)
         if typeof(s) ~= "Instance" or seen[s] then return end
+        seen[s] = true
         local ok, isScript = pcall(function() return s:IsA("LuaSourceContainer") end)
-        if ok and isScript then
-            seen[s] = true
+        if ok and isScript and not isCoreInstance(s) then
             table.insert(list, s)
         end
     end
-    if getscripts then pcall(function() for _, s in ipairs(getscripts()) do add(s) end end) end
-    if getloadedmodules then pcall(function() for _, s in ipairs(getloadedmodules()) do add(s) end end) end
-    pcall(function() for _, d in ipairs(game:GetDescendants()) do add(d) end end)
-    if getnilinstances then pcall(function() for _, d in ipairs(getnilinstances()) do add(d) end end) end
+    local function addList(getter)
+        local ok, items = pcall(getter)
+        if ok and type(items) == "table" then
+            for _, s in ipairs(items) do
+                add(s)
+                breathe()
+            end
+        end
+    end
+    if getscripts then addList(getscripts) end
+    if getloadedmodules then addList(getloadedmodules) end
+    walk(game, function(d)
+        add(d)
+        return #list >= 3000
+    end)
+    if getnilinstances then addList(getnilinstances) end
+    scriptListCache, scriptListTime = list, os.clock()
     return list
 end
 
@@ -376,14 +448,30 @@ local function listScripts(filter)
     return table.concat(out, "\n") .. note
 end
 
-local sourceCache = setmetatable({}, { __mode = "k" })
+local sourceCache = {}
+local sourceOrder = {}
+local sourceChars = 0
 
-local function getSource(s)
+local function cacheSource(s, src)
+    sourceCache[s] = src
+    table.insert(sourceOrder, s)
+    sourceChars = sourceChars + #src
+    while sourceChars > perf().cacheChars and #sourceOrder > 1 do
+        local old = table.remove(sourceOrder, 1)
+        local oldSrc = sourceCache[old]
+        if oldSrc then sourceChars = sourceChars - #oldSrc end
+        sourceCache[old] = nil
+    end
+end
+
+local function getSource(s, noCache)
     if sourceCache[s] then return sourceCache[s] end
     local src
     if decompile then
         local ok, r = pcall(decompile, s)
         if ok and type(r) == "string" and r:find("%S") then src = r end
+        task.wait()
+        lastYield = os.clock()
     end
     if not src then
         pcall(function()
@@ -391,7 +479,7 @@ local function getSource(s)
             if type(r) == "string" and r:find("%S") then src = r end
         end)
     end
-    if src then sourceCache[s] = src end
+    if src and not noCache then cacheSource(s, src) end
     return src
 end
 
@@ -400,10 +488,11 @@ local function searchCode(query)
     local q = query:lower()
     local out = {}
     local scanned, failed = 0, 0
-    for i, s in ipairs(allScripts()) do
-        if i % 8 == 0 then task.wait() end
-        if scanned >= 300 or #out >= 40 then break end
-        local src = getSource(s)
+    local limit = perf().decompile
+    local scripts = allScripts()
+    for _, s in ipairs(scripts) do
+        if scanned + failed >= limit or #out >= 40 then break end
+        local src = getSource(s, true)
         if src then
             scanned = scanned + 1
             local ln = 0
@@ -413,12 +502,16 @@ local function searchCode(query)
                     table.insert(out, s:GetFullName() .. " [" .. s.ClassName .. "] línea " .. ln .. ": " .. line:gsub("^%s+", ""):sub(1, 160))
                     if #out >= 40 then break end
                 end
+                if ln % 400 == 0 then breathe() end
             end
         else
             failed = failed + 1
         end
     end
-    local summary = "\n(Scripts revisados: " .. scanned .. ", sin poder leer: " .. failed .. ")"
+    local summary = "\n(Scripts revisados: " .. scanned .. " de " .. #scripts .. ", sin poder leer: " .. failed .. ")"
+    if scanned + failed >= limit and #scripts > limit then
+        summary = summary .. "\n(Límite de rendimiento alcanzado. Para revisar menos scripts pero más precisos usa [[scripts: filtro]] y luego [[codigo: ruta]].)"
+    end
     if #out == 0 then return "No se encontró \"" .. query .. "\" en el código." .. summary end
     return table.concat(out, "\n") .. summary
 end
@@ -447,12 +540,13 @@ local function dumpScripts(filter)
     end)
     if not okFolder then return "No se pudo crear la carpeta " .. base end
     local saved, failed, names = 0, 0, {}
-    for i, s in ipairs(allScripts()) do
-        if i % 5 == 0 then task.wait() end
-        if saved >= 500 then break end
+    local maxDump = perf().decompile * 4
+    for _, s in ipairs(allScripts()) do
+        if saved + failed >= maxDump then break end
         local full = s:GetFullName()
         if not f or full:lower():find(f, 1, true) then
-            local src = getSource(s)
+            local src = getSource(s, true)
+            task.wait()
             if src then
                 local fileName = full:gsub("[^%w%._]", "_") .. ".lua"
                 if pcall(writefile, base .. "/" .. fileName, src) then
@@ -1111,6 +1205,9 @@ end
 local function chatParagraph(opts)
     local p = ChatTab:Paragraph(opts)
     table.insert(chatElements, p)
+    if #chatElements > 120 then
+        for _ = 1, 20 do destroyElement(table.remove(chatElements, 1)) end
+    end
     return p
 end
 
@@ -1140,6 +1237,10 @@ local function renderCode(entry)
         end
         table.insert(chunks, src:sub(pos, stop))
         pos = stop + 1
+        if #chunks >= 6 and pos <= #src then
+            chunks[#chunks] = chunks[#chunks] .. "\n\n...(vista recortada para no saturar el dispositivo; usa Copiar script o Guardar archivo para tener el código completo)"
+            break
+        end
     end
     if #chunks == 0 then chunks = { "" } end
     local savedPath
@@ -1274,6 +1375,23 @@ local function agentLoop(userText)
 
         local tools = parseTools(reply)
         local visible = cleanText(reply)
+        local skippedNote
+        do
+            local heavy = { buscar_codigo = true, guardar_scripts = true, remotes = true, scripts = true }
+            local usedHeavy, kept, skipped = {}, {}, 0
+            for _, tool in ipairs(tools) do
+                if #kept >= perf().maxTools or (heavy[tool.kind] and usedHeavy[tool.kind]) then
+                    skipped = skipped + 1
+                else
+                    if heavy[tool.kind] then usedHeavy[tool.kind] = true end
+                    table.insert(kept, tool)
+                end
+            end
+            if skipped > 0 then
+                skippedNote = "[sistema] Se omitieron " .. skipped .. " herramientas para no sobrecargar el dispositivo. Máximo " .. perf().maxTools .. " por respuesta y solo una de cada tipo pesado (buscar_codigo, guardar_scripts, remotes, scripts). Pide las restantes en el siguiente paso si las necesitas."
+            end
+            tools = kept
+        end
 
         if #tools == 0 then
             pcall(function() thinking:SetDesc(visible ~= "" and visible or reply) end)
@@ -1366,6 +1484,7 @@ local function agentLoop(userText)
             addMessage("tool", "Script listo (ejecución automática desactivada)", { pending = code })
         end
 
+        if skippedNote then table.insert(results, skippedNote) end
         if #results == 0 then return end
 
         thinking = addMessage("ai", "Analizando resultados...")
@@ -1592,6 +1711,17 @@ ConfigTab:Toggle({
     Value = config.allowScan,
     Callback = function(state)
         config.allowScan = state
+        saveConfig()
+    end,
+})
+
+ConfigTab:Dropdown({
+    Title = "Rendimiento",
+    Desc = "Bajo = más seguro en celulares, evita que Roblox se cierre",
+    Values = { "Bajo", "Medio", "Alto" },
+    Value = config.perf,
+    Callback = function(option)
+        config.perf = type(option) == "table" and option[1] or option
         saveConfig()
     end,
 })
