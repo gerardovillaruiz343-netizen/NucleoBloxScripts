@@ -258,6 +258,182 @@ local function listRemotes()
     return #out > 0 and table.concat(out, "\n") or "No se encontraron remotes."
 end
 
+local LogService = game:GetService("LogService")
+local consoleBuffer = {}
+
+local function logTypeName(t)
+    local ok, name = pcall(function() return t.Name end)
+    return ((ok and name) or tostring(t)):gsub("^Message", "")
+end
+
+pcall(function()
+    for _, e in ipairs(LogService:GetLogHistory()) do
+        table.insert(consoleBuffer, "[" .. logTypeName(e.messageType) .. "] " .. tostring(e.message))
+    end
+end)
+pcall(function()
+    LogService.MessageOut:Connect(function(msg, mtype)
+        table.insert(consoleBuffer, "[" .. logTypeName(mtype) .. "] " .. tostring(msg))
+        if #consoleBuffer > 600 then table.remove(consoleBuffer, 1) end
+    end)
+end)
+
+local function getConsole(filter)
+    local f = filter and filter ~= "" and filter:lower() or nil
+    local out = {}
+    for i = #consoleBuffer, 1, -1 do
+        local line = consoleBuffer[i]
+        if not f or line:lower():find(f, 1, true) then
+            table.insert(out, 1, line:sub(1, 300))
+            if #out >= 150 then break end
+        end
+    end
+    if #out == 0 then return "La consola está vacía" .. (f and (" para: " .. filter) or "") .. "." end
+    return table.concat(out, "\n")
+end
+
+local function characterReport()
+    local char = LocalPlayer.Character
+    if not char then return "No hay personaje cargado." end
+    local lines = { "Character: " .. char:GetFullName() }
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        table.insert(lines, "Humanoid: " .. table.concat(getProps(hum), ", "))
+        pcall(function() table.insert(lines, "Estado: " .. hum:GetState().Name) end)
+        pcall(function() table.insert(lines, "MoveDirection=" .. fmt(hum.MoveDirection)) end)
+        pcall(function()
+            local d = hum:GetAppliedDescription()
+            table.insert(lines, string.format("Escalas: Altura=%.2f Ancho=%.2f Profundidad=%.2f Cabeza=%.2f", d.HeightScale, d.WidthScale, d.DepthScale, d.HeadScale))
+        end)
+    end
+    table.insert(lines, "=== Contenido del personaje ===")
+    local count = 0
+    for _, d in ipairs(char:GetDescendants()) do
+        count = count + 1
+        if count > 220 then table.insert(lines, "...") break end
+        local p = getProps(d)
+        table.insert(lines, d:GetFullName() .. " [" .. d.ClassName .. "]" .. (#p > 0 and (" " .. table.concat(p, ", "):sub(1, 160)) or ""))
+    end
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if bp then
+        local tools = {}
+        for _, t in ipairs(bp:GetChildren()) do table.insert(tools, t.Name .. " [" .. t.ClassName .. "]") end
+        table.insert(lines, "Backpack: " .. (#tools > 0 and table.concat(tools, ", ") or "vacío"))
+    end
+    local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+    if ps then
+        local names = {}
+        for _, s in ipairs(ps:GetChildren()) do table.insert(names, s.Name .. " [" .. s.ClassName .. "]") end
+        table.insert(lines, "PlayerScripts: " .. table.concat(names, ", "))
+    end
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then
+        local guis = {}
+        for _, g in ipairs(pg:GetChildren()) do
+            local en = ""
+            pcall(function() en = g.Enabled and "" or " (oculta)" end)
+            table.insert(guis, g.Name .. en)
+        end
+        table.insert(lines, "PlayerGui: " .. table.concat(guis, ", "))
+    end
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        table.insert(lines, "Cámara: FieldOfView=" .. cam.FieldOfView .. ", CameraType=" .. cam.CameraType.Name .. ", Posición=" .. fmt(cam.CFrame.Position))
+    end)
+    return table.concat(lines, "\n")
+end
+
+local function allScripts()
+    local list, seen = {}, {}
+    local function add(s)
+        if typeof(s) ~= "Instance" or seen[s] then return end
+        local ok, isScript = pcall(function() return s:IsA("LuaSourceContainer") end)
+        if ok and isScript then
+            seen[s] = true
+            table.insert(list, s)
+        end
+    end
+    if getscripts then pcall(function() for _, s in ipairs(getscripts()) do add(s) end end) end
+    if getloadedmodules then pcall(function() for _, s in ipairs(getloadedmodules()) do add(s) end end) end
+    pcall(function() for _, d in ipairs(game:GetDescendants()) do add(d) end end)
+    if getnilinstances then pcall(function() for _, d in ipairs(getnilinstances()) do add(d) end end) end
+    return list
+end
+
+local function listScripts(filter)
+    local f = filter and filter ~= "" and filter:lower() or nil
+    local out = {}
+    for _, s in ipairs(allScripts()) do
+        local full = s:GetFullName()
+        if not f or full:lower():find(f, 1, true) then
+            table.insert(out, full .. " [" .. s.ClassName .. "]")
+            if #out >= 200 then table.insert(out, "...") break end
+        end
+    end
+    local note = decompile and "" or "\n(Este executor no tiene decompile: solo se ven nombres, no el código.)"
+    if #out == 0 then return "No se encontraron scripts" .. (f and (" con: " .. filter) or "") .. "." .. note end
+    return table.concat(out, "\n") .. note
+end
+
+local sourceCache = setmetatable({}, { __mode = "k" })
+
+local function getSource(s)
+    if sourceCache[s] then return sourceCache[s] end
+    local src
+    if decompile then
+        local ok, r = pcall(decompile, s)
+        if ok and type(r) == "string" and r:find("%S") then src = r end
+    end
+    if not src then
+        pcall(function()
+            local r = s.Source
+            if type(r) == "string" and r:find("%S") then src = r end
+        end)
+    end
+    if src then sourceCache[s] = src end
+    return src
+end
+
+local function searchCode(query)
+    if not decompile then return "Este executor no tiene decompile; no se puede leer el código de los scripts. Usa [[scripts]] para ver nombres." end
+    local q = query:lower()
+    local out = {}
+    local scanned, failed = 0, 0
+    for i, s in ipairs(allScripts()) do
+        if i % 8 == 0 then task.wait() end
+        if scanned >= 300 or #out >= 40 then break end
+        local src = getSource(s)
+        if src then
+            scanned = scanned + 1
+            local ln = 0
+            for line in (src .. "\n"):gmatch("(.-)\n") do
+                ln = ln + 1
+                if line:lower():find(q, 1, true) then
+                    table.insert(out, s:GetFullName() .. " [" .. s.ClassName .. "] línea " .. ln .. ": " .. line:gsub("^%s+", ""):sub(1, 160))
+                    if #out >= 40 then break end
+                end
+            end
+        else
+            failed = failed + 1
+        end
+    end
+    local summary = "\n(Scripts revisados: " .. scanned .. ", sin poder leer: " .. failed .. ")"
+    if #out == 0 then return "No se encontró \"" .. query .. "\" en el código." .. summary end
+    return table.concat(out, "\n") .. summary
+end
+
+local function saveExport(name, content)
+    local safe = name:gsub("[^%w%._%-]", "_")
+    if not safe:find("%.") then safe = safe .. ".lua" end
+    local path = "XAiK/Exports/" .. safe
+    local ok = pcall(function()
+        if not isfolder("XAiK") then makefolder("XAiK") end
+        if not isfolder("XAiK/Exports") then makefolder("XAiK/Exports") end
+        writefile(path, content)
+    end)
+    return ok and path or nil
+end
+
 local function playerContext()
     local lines = { "Jugador: " .. LocalPlayer.Name .. " (UserId " .. LocalPlayer.UserId .. ")" }
     local char = LocalPlayer.Character
@@ -327,16 +503,24 @@ Tienes HERRAMIENTAS. Para usarlas escribe exactamente estas etiquetas en tu resp
 [[buscar: texto]]  busca instancias por nombre, clase, propiedad o atributo (ej: [[buscar: WalkSpeed]], [[buscar: coins]]).
 [[inspeccionar: ruta]]  muestra propiedades, atributos, hijos y código de una instancia (ej: [[inspeccionar: Character.Humanoid]], [[inspeccionar: game.ReplicatedStorage.Remotes]]).
 [[remotes]]  lista todos los RemoteEvents/RemoteFunctions.
+[[consola]] o [[consola: filtro]]  lee los últimos mensajes, warnings y errores de la consola (F9).
+[[personaje]]  reporte completo del personaje: Humanoid, estado, escalas, partes, accesorios, scripts, Backpack, PlayerScripts, PlayerGui y cámara.
+[[scripts]] o [[scripts: filtro]]  lista todos los scripts del juego (LocalScript, ModuleScript, Script, incluso los ocultos en nil).
+[[buscar_codigo: texto]]  busca un texto DENTRO del código de todos los scripts y devuelve script, línea y fragmento.
+[[codigo: ruta]]  le MUESTRA al usuario el nombre y el código COMPLETO del script (con botones copiar y guardar) y tú también lo recibes.
+[[archivo: Nombre.lua]] seguido inmediatamente de un bloque ```lua```  NO se ejecuta: se le muestra al usuario y se guarda como archivo.
 ```lua
 codigo
 ```  el código Luau en un bloque lua se EJECUTA en el cliente y recibirás la salida de print o el error.
 Atajos de ruta: "LocalPlayer", "Character", "workspace", "game.Servicio...".
+Puedes revisar TODO: consola, personaje, scripts, código, valores, remotes, GUIs. Úsalo libremente para entender el problema antes de actuar.
 Reglas:
+0) Si el usuario pide que le des un archivo, un script o que busques un código: búscalo ([[scripts: nombre]], [[buscar_codigo: texto]] o [[buscar: nombre]]) y luego usa [[codigo: ruta]] para mostrárselo completo. En tu respuesta di el nombre del script y su ruta. Si pide un archivo nuevo creado por ti, usa [[archivo: Nombre.lua]] + bloque de código.
 1) Antes de modificar algo, busca o inspecciona primero si no estás seguro de la ruta. Recibirás los resultados en el siguiente mensaje.
 2) Si encuentras lo que el usuario pidió, ejecuta el código para hacerlo (ej: velocidad -> LocalPlayer.Character.Humanoid.WalkSpeed = 50) y confirma con print.
 3) Si no encuentras coincidencia exacta, NO ejecutes; di qué encontraste parecido (rutas completas) y haz preguntas breves y numeradas con opciones, al estilo de Claude.
 4) Ten en cuenta que solo puedes afectar al cliente; los cambios del servidor requieren RemoteEvents.
-5) NUNCA le des scripts al usuario para que los ejecute él ni le digas "copia y pega esto". Tú ejecutas todo el código directamente poniéndolo en un bloque ```lua```; el usuario ya tiene un botón para copiarlo si lo quiere.
+5) Salvo la regla 0, NUNCA le des scripts al usuario para que los ejecute él ni le digas "copia y pega esto". Tú ejecutas todo el código directamente poniéndolo en un bloque ```lua```; el usuario ya tiene un botón para copiarlo si lo quiere.
 6) Si el usuario pide un script (ej: fly, noclip, ESP, GUI), escríbelo completo en un bloque ```lua``` para que se ejecute de inmediato.
 7) Cuando ya terminaste, responde en texto breve explicando qué hiciste, sin etiquetas ni bloques de código.]=]
 
@@ -359,6 +543,10 @@ local function callAPI(content)
     local provider = providers[config.provider] or providers.Claude
     local model = (config.model ~= "" and config.model) or provider.model
     table.insert(history, { role = "user", content = content })
+    while #history > 40 do
+        table.remove(history, 1)
+        table.remove(history, 1)
+    end
     return sendRequest(req, provider, model, false)
 end
 
@@ -519,17 +707,32 @@ local function addMessage(role, text, buttons)
     })
 end
 
+local function escapeRich(s)
+    return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
 local codeLangs = { [""] = true, lua = true, luau = true, rbxlua = true, roblox = true }
 
 local function isCodeBlock(lang)
     return codeLangs[(lang or ""):lower()] == true
 end
 
+local filePattern = "%[%[%s*archivo%s*:%s*(.-)%s*%]%]%s*```[%w_]*[^\n]*\n(.-)```"
+
 local function parseTools(text)
     local tools = {}
+    text = text:gsub(filePattern, function(name, code)
+        table.insert(tools, { kind = "archivo", arg = name, code = code })
+        return ""
+    end)
     for q in text:gmatch("%[%[%s*buscar%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "buscar", arg = q }) end
     for p in text:gmatch("%[%[%s*inspeccionar%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "inspeccionar", arg = p }) end
     if text:find("%[%[%s*remotes%s*%]%]") then table.insert(tools, { kind = "remotes" }) end
+    for f in text:gmatch("%[%[%s*consola%s*:?%s*(.-)%s*%]%]") do table.insert(tools, { kind = "consola", arg = f }) end
+    if text:find("%[%[%s*personaje%s*%]%]") then table.insert(tools, { kind = "personaje" }) end
+    for f in text:gmatch("%[%[%s*scripts%s*:?%s*(.-)%s*%]%]") do table.insert(tools, { kind = "scripts", arg = f }) end
+    for q in text:gmatch("%[%[%s*buscar_codigo%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "buscar_codigo", arg = q }) end
+    for p in text:gmatch("%[%[%s*codigo%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "codigo", arg = p }) end
     for lang, code in text:gmatch("```([%w_]*)[^\n]*\n(.-)```") do
         if isCodeBlock(lang) and code:find("%S") then
             table.insert(tools, { kind = "ejecutar", arg = code })
@@ -539,7 +742,8 @@ local function parseTools(text)
 end
 
 local function cleanText(text)
-    local t = text:gsub("%[%[.-%]%]", "")
+    local t = text:gsub(filePattern, "")
+    t = t:gsub("%[%[.-%]%]", "")
     t = t:gsub("```([%w_]*)([^\n]*\n.-)```", function(lang, rest)
         if isCodeBlock(lang) then return "" end
         return "```" .. lang .. rest .. "```"
@@ -562,6 +766,53 @@ local function copyButton(code)
         Icon = "copy",
         Callback = function() copyText(code) end,
     }
+end
+
+local function displayCode(name, location, className, src)
+    local lineCount = select(2, src:gsub("\n", "\n")) + 1
+    local chunks = {}
+    local pos = 1
+    while pos <= #src do
+        local stop = math.min(pos + 3500, #src)
+        if stop < #src then
+            local nl = src:sub(pos, stop):match(".*()\n")
+            if nl and nl > 200 then stop = pos + nl - 1 end
+        end
+        table.insert(chunks, src:sub(pos, stop))
+        pos = stop + 1
+    end
+    if #chunks == 0 then chunks = { "" } end
+    local savedPath
+    local buttons = {
+        copyButton(src),
+        {
+            Title = "Guardar archivo",
+            Icon = "save",
+            Callback = function()
+                savedPath = saveExport(name, src)
+                WindUI:Notify({
+                    Title = "XAiK",
+                    Content = savedPath and ("Guardado en la carpeta workspace del executor: " .. savedPath) or "Tu executor no permite guardar archivos.",
+                    Icon = savedPath and "save" or "triangle-alert",
+                    Duration = 6,
+                })
+            end,
+        },
+    }
+    for i, chunk in ipairs(chunks) do
+        local header = ""
+        if i == 1 then
+            header = "Nombre: " .. name .. "\nRuta: " .. location .. "\nTipo: " .. className .. "\nLíneas: " .. lineCount .. "\n\n"
+        end
+        ChatTab:Paragraph({
+            Title = "Código: " .. name .. (#chunks > 1 and (" (parte " .. i .. "/" .. #chunks .. ")") or ""),
+            Desc = escapeRich(header .. chunk),
+            Image = "file-code",
+            ImageSize = 20,
+            Buttons = i == 1 and buttons or nil,
+        })
+    end
+    return lineCount
 end
 
 local processing = false
@@ -617,6 +868,41 @@ local function agentLoop(userText)
             elseif tool.kind == "remotes" then
                 addMessage("tool", "Listando RemoteEvents y RemoteFunctions")
                 table.insert(results, "[remotes]\n" .. listRemotes():sub(1, 5000))
+            elseif tool.kind == "archivo" then
+                local path = saveExport(tool.arg, tool.code)
+                displayCode(tool.arg, path and ("workspace del executor/" .. path) or "Generado por XAiK", "Archivo", tool.code)
+                table.insert(results, "[archivo: " .. tool.arg .. "] Mostrado al usuario" .. (path and (" y guardado en " .. path) or " (no se pudo guardar)") .. ".")
+            elseif not config.allowScan then
+                table.insert(results, "[" .. tool.kind .. "] El escaneo está desactivado por el usuario.")
+            elseif tool.kind == "consola" then
+                addMessage("tool", "Revisando consola" .. (tool.arg ~= "" and (": " .. tool.arg) or ""))
+                table.insert(results, "[consola" .. (tool.arg ~= "" and (": " .. tool.arg) or "") .. "]\n" .. getConsole(tool.arg):sub(1, 8000))
+            elseif tool.kind == "personaje" then
+                addMessage("tool", "Revisando tu personaje")
+                table.insert(results, "[personaje]\n" .. characterReport():sub(1, 9000))
+            elseif tool.kind == "scripts" then
+                addMessage("tool", "Listando scripts" .. (tool.arg ~= "" and (": " .. tool.arg) or ""))
+                table.insert(results, "[scripts" .. (tool.arg ~= "" and (": " .. tool.arg) or "") .. "]\n" .. listScripts(tool.arg):sub(1, 8000))
+            elseif tool.kind == "buscar_codigo" then
+                addMessage("tool", "Buscando en el código: " .. tool.arg)
+                table.insert(results, "[buscar_codigo: " .. tool.arg .. "]\n" .. searchCode(tool.arg):sub(1, 6000))
+            elseif tool.kind == "codigo" then
+                local inst = resolvePath(tool.arg)
+                local isScript = inst and select(2, pcall(function() return inst:IsA("LuaSourceContainer") end)) == true
+                if not inst then
+                    table.insert(results, "[codigo: " .. tool.arg .. "] No existe esa ruta. Usa [[scripts: nombre]] para encontrar la ruta exacta.")
+                elseif not isScript then
+                    table.insert(results, "[codigo: " .. tool.arg .. "] No es un script, es " .. inst.ClassName .. ".")
+                else
+                    local src = getSource(inst)
+                    if not src then
+                        addMessage("tool", "No se pudo leer el código de " .. inst:GetFullName())
+                        table.insert(results, "[codigo: " .. tool.arg .. "] No se pudo obtener el código (" .. (decompile and "decompile falló" or "el executor no tiene decompile") .. ").")
+                    else
+                        local lines = displayCode(inst.Name, inst:GetFullName(), inst.ClassName, src)
+                        table.insert(results, "[codigo: " .. inst:GetFullName() .. "] Mostrado completo al usuario (" .. lines .. " líneas). Código:\n" .. src:sub(1, 8000) .. (#src > 8000 and "\n...(recortado para ti, el usuario sí lo ve completo)" or ""))
+                    end
+                end
             elseif tool.kind == "ejecutar" then
                 if config.autoExec then
                     local code = tool.arg
@@ -699,7 +985,7 @@ ChatTab:Button({
     end,
 })
 
-addMessage("ai", "Hola, soy XAiK. Configura tu Api-Key en la pestaña XAiK Configuration. Puedo buscar en el juego, leer propiedades y valores, ver RemoteEvents y ejecutar código. Prueba: \"pon mi velocidad en 50\".")
+addMessage("ai", "Hola, soy XAiK. Configura tu Api-Key en la pestaña XAiK Configuration. Puedo revisar la consola, tu personaje, todos los scripts y su código, valores y RemoteEvents, y ejecutar código. Prueba: \"pon mi velocidad en 50\" o \"dame el código del script que maneja las armas\".")
 
 ConfigTab:Section({ Title = "Inteligencia Artificial" })
 
