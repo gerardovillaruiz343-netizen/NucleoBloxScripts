@@ -95,6 +95,7 @@ pcall(function()
 end)
 
 local ChatTab = Window:Tab({ Title = "Chat", Icon = "message-circle" })
+local HistoryTab = Window:Tab({ Title = "Historial", Icon = "history" })
 local ConfigTab = Window:Tab({ Title = "XAiK Configuration", Icon = "settings" })
 
 local knownProps = {
@@ -434,8 +435,323 @@ local function saveExport(name, content)
     return ok and path or nil
 end
 
+local function dumpScripts(filter)
+    if not decompile then return "Este executor no tiene decompile; no se puede extraer el código." end
+    if not writefile then return "Este executor no permite guardar archivos." end
+    local f = filter and filter ~= "" and filter:lower() or nil
+    local base = "XAiK/Dumps/" .. tostring(game.PlaceId)
+    local okFolder = pcall(function()
+        if not isfolder("XAiK") then makefolder("XAiK") end
+        if not isfolder("XAiK/Dumps") then makefolder("XAiK/Dumps") end
+        if not isfolder(base) then makefolder(base) end
+    end)
+    if not okFolder then return "No se pudo crear la carpeta " .. base end
+    local saved, failed, names = 0, 0, {}
+    for i, s in ipairs(allScripts()) do
+        if i % 5 == 0 then task.wait() end
+        if saved >= 500 then break end
+        local full = s:GetFullName()
+        if not f or full:lower():find(f, 1, true) then
+            local src = getSource(s)
+            if src then
+                local fileName = full:gsub("[^%w%._]", "_") .. ".lua"
+                if pcall(writefile, base .. "/" .. fileName, src) then
+                    saved = saved + 1
+                    if #names < 40 then table.insert(names, fileName) end
+                else
+                    failed = failed + 1
+                end
+            else
+                failed = failed + 1
+            end
+        end
+    end
+    return "Guardados " .. saved .. " scripts en workspace del executor/" .. base .. " (fallidos: " .. failed .. ")\n" .. table.concat(names, "\n") .. (saved > #names and "\n..." or "")
+end
+
+local PathfindingService = game:GetService("PathfindingService")
+local TextChatService = game:GetService("TextChatService")
+local RunService = game:GetService("RunService")
+
+local Control = {}
+local followConn
+
+local function charParts()
+    local c = LocalPlayer.Character
+    return c, c and c:FindFirstChildOfClass("Humanoid"), c and c:FindFirstChild("HumanoidRootPart")
+end
+
+function Control.findPlayer(name)
+    local n = tostring(name):lower():gsub("^@", "")
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower():sub(1, #n) == n or p.DisplayName:lower():sub(1, #n) == n then return p end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower():find(n, 1, true) or p.DisplayName:lower():find(n, 1, true) then return p end
+    end
+    return nil
+end
+
+function Control.players()
+    local out = {}
+    local _, _, root = charParts()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local dist = ""
+            local r = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+            if root and r then dist = string.format(" (%.0f studs)", (r.Position - root.Position).Magnitude) end
+            table.insert(out, p.DisplayName .. " @" .. p.Name .. dist)
+        end
+    end
+    return out
+end
+
+local function toPosition(target)
+    local t = typeof(target)
+    if t == "Vector3" then return target end
+    if t == "CFrame" then return target.Position end
+    if t == "Instance" then
+        if target:IsA("Player") then
+            local r = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+            return r and r.Position
+        end
+        if target:IsA("BasePart") then return target.Position end
+        if target:IsA("Model") then return target:GetPivot().Position end
+        if target:IsA("Attachment") then return target.WorldPosition end
+        local part = target:FindFirstChildWhichIsA("BasePart", true)
+        return part and part.Position
+    end
+    if t == "string" then
+        local p = Control.findPlayer(target)
+        if p then return toPosition(p) end
+        local inst = resolvePath(target)
+        if inst then return toPosition(inst) end
+    end
+    return nil
+end
+Control.position = toPosition
+
+function Control.teleport(target)
+    local _, _, root = charParts()
+    local pos = toPosition(target)
+    if not root then return false, "No hay personaje" end
+    if not pos then return false, "Destino no encontrado" end
+    root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    return true
+end
+
+function Control.walkTo(target, timeout)
+    local _, hum, root = charParts()
+    local pos = toPosition(target)
+    if not hum or not root then return false, "No hay personaje" end
+    if not pos then return false, "Destino no encontrado" end
+    local path = PathfindingService:CreatePath({ AgentCanJump = true })
+    local ok = pcall(function() path:ComputeAsync(root.Position, pos) end)
+    local waypoints
+    if ok and path.Status == Enum.PathStatus.Success then
+        waypoints = path:GetWaypoints()
+    else
+        waypoints = { { Position = pos, Action = Enum.PathWaypointAction.Walk } }
+    end
+    local deadline = os.clock() + (timeout or 30)
+    for _, wp in ipairs(waypoints) do
+        if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+        hum:MoveTo(wp.Position)
+        local reached = false
+        local conn = hum.MoveToFinished:Connect(function() reached = true end)
+        local t0 = os.clock()
+        while not reached and os.clock() - t0 < 4 and os.clock() < deadline do task.wait() end
+        conn:Disconnect()
+        if os.clock() >= deadline then return false, "Tiempo agotado" end
+    end
+    return true
+end
+
+local walkDirs = {
+    adelante = Vector3.new(0, 0, -1), forward = Vector3.new(0, 0, -1),
+    atras = Vector3.new(0, 0, 1), ["atrás"] = Vector3.new(0, 0, 1), back = Vector3.new(0, 0, 1),
+    izquierda = Vector3.new(-1, 0, 0), left = Vector3.new(-1, 0, 0),
+    derecha = Vector3.new(1, 0, 0), right = Vector3.new(1, 0, 0),
+}
+
+function Control.walk(direction, seconds)
+    local _, hum = charParts()
+    if not hum then return false, "No hay personaje" end
+    local v = typeof(direction) == "Vector3" and direction or walkDirs[tostring(direction):lower()] or walkDirs.adelante
+    local t0 = os.clock()
+    while os.clock() - t0 < (seconds or 1) do
+        hum:Move(v, true)
+        RunService.Heartbeat:Wait()
+    end
+    hum:Move(Vector3.new(0, 0, 0), true)
+    return true
+end
+
+function Control.jump()
+    local _, hum = charParts()
+    if not hum then return false end
+    hum.Jump = true
+    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+    return true
+end
+
+function Control.sit(state)
+    local _, hum = charParts()
+    if not hum then return false end
+    hum.Sit = state ~= false
+    return true
+end
+
+function Control.stopFollow()
+    if followConn then
+        followConn:Disconnect()
+        followConn = nil
+    end
+    return true
+end
+
+function Control.stop()
+    Control.stopFollow()
+    local _, hum, root = charParts()
+    if hum and root then
+        hum:Move(Vector3.new(0, 0, 0), true)
+        hum:MoveTo(root.Position)
+    end
+    return true
+end
+
+function Control.follow(target, distance)
+    Control.stopFollow()
+    distance = distance or 5
+    followConn = RunService.Heartbeat:Connect(function()
+        local _, hum, root = charParts()
+        local pos = toPosition(target)
+        if hum and root and pos and (pos - root.Position).Magnitude > distance then
+            hum:MoveTo(pos)
+        end
+    end)
+    return true
+end
+
+function Control.lookAt(target)
+    local _, _, root = charParts()
+    local pos = toPosition(target)
+    if not root or not pos then return false end
+    root.CFrame = CFrame.lookAt(root.Position, Vector3.new(pos.X, root.Position.Y, pos.Z))
+    return true
+end
+
+function Control.equip(name)
+    local _, hum = charParts()
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if not hum or not bp then return false, "No hay personaje o Backpack" end
+    local n = tostring(name or ""):lower()
+    for _, t in ipairs(bp:GetChildren()) do
+        if t:IsA("Tool") and (n == "" or t.Name:lower():find(n, 1, true)) then
+            hum:EquipTool(t)
+            return true, t.Name
+        end
+    end
+    return false, "No se encontró la herramienta"
+end
+
+function Control.unequip()
+    local _, hum = charParts()
+    if not hum then return false end
+    hum:UnequipTools()
+    return true
+end
+
+function Control.useTool()
+    local c = charParts()
+    local tool = c and c:FindFirstChildOfClass("Tool")
+    if not tool then return false, "No hay herramienta equipada" end
+    tool:Activate()
+    return true, tool.Name
+end
+
+function Control.interact(target)
+    local inst = typeof(target) == "Instance" and target or resolvePath(tostring(target))
+    if not inst then return false, "No existe" end
+    local prompt = inst:IsA("ProximityPrompt") and inst or inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt then
+        if fireproximityprompt then
+            pcall(fireproximityprompt, prompt)
+        else
+            prompt:InputHoldBegin()
+            task.wait(prompt.HoldDuration + 0.05)
+            prompt:InputHoldEnd()
+        end
+        return true, "ProximityPrompt"
+    end
+    local click = inst:IsA("ClickDetector") and inst or inst:FindFirstChildWhichIsA("ClickDetector", true)
+    if click and fireclickdetector then
+        pcall(fireclickdetector, click)
+        return true, "ClickDetector"
+    end
+    local _, _, root = charParts()
+    local part = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart", true)
+    if part and root and firetouchinterest then
+        firetouchinterest(root, part, 0)
+        task.wait()
+        firetouchinterest(root, part, 1)
+        return true, "Touch"
+    end
+    return false, "No hay forma de interactuar con eso"
+end
+
+function Control.chat(msg)
+    msg = tostring(msg)
+    local ok, err = pcall(function()
+        if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+            local channels = TextChatService:FindFirstChild("TextChannels")
+            local ch = channels and channels:FindFirstChild("RBXGeneral")
+            if not ch and channels then
+                for _, c in ipairs(channels:GetChildren()) do
+                    if c:IsA("TextChannel") then ch = c break end
+                end
+            end
+            if not ch then error("No hay canal de chat") end
+            ch:SendAsync(msg)
+        else
+            game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer(msg, "All")
+        end
+    end)
+    return ok, ok and "Enviado" or tostring(err)
+end
+
+function Control.setSpeed(n)
+    local _, hum = charParts()
+    if not hum then return false end
+    hum.WalkSpeed = n
+    return true
+end
+
+function Control.setJump(n)
+    local _, hum = charParts()
+    if not hum then return false end
+    hum.UseJumpPower = true
+    hum.JumpPower = n
+    return true
+end
+
+function Control.reset()
+    local _, hum = charParts()
+    if not hum then return false end
+    hum.Health = 0
+    return true
+end
+
 local function playerContext()
     local lines = { "Jugador: " .. LocalPlayer.Name .. " (UserId " .. LocalPlayer.UserId .. ")" }
+    pcall(function()
+        local others = Control.players()
+        if #others > 0 then
+            local shown = {}
+            for i = 1, math.min(#others, 25) do shown[i] = others[i] end
+            table.insert(lines, "Otros jugadores: " .. table.concat(shown, ", "))
+        end
+    end)
     local char = LocalPlayer.Character
     if char then
         table.insert(lines, "Character: " .. char:GetFullName())
@@ -472,6 +788,7 @@ local function runCode(code)
             for i = 1, select("#", ...) do t[i] = tostring(select(i, ...)) end
             table.insert(output, "WARN: " .. table.concat(t, " "))
         end,
+        XAiK = Control,
     }, { __index = getfenv() })
     pcall(setfenv, fn, env)
     local results
@@ -512,10 +829,21 @@ Tienes HERRAMIENTAS. Para usarlas escribe exactamente estas etiquetas en tu resp
 ```lua
 codigo
 ```  el código Luau en un bloque lua se EJECUTA en el cliente y recibirás la salida de print o el error.
+[[chat: mensaje]]  envía ese mensaje al chat del juego como el jugador.
+[[guardar_scripts]] o [[guardar_scripts: filtro]]  decompila y guarda los scripts del juego como archivos .lua en la carpeta XAiK/Dumps/<PlaceId> del executor.
+CONTROL DEL PERSONAJE: dentro de los bloques ```lua``` tienes la tabla XAiK (devuelven ok, info):
+XAiK.walkTo(destino, timeout)  camina con pathfinding. destino puede ser Vector3, CFrame, Instance, nombre de jugador o ruta ("workspace.Tienda").
+XAiK.teleport(destino)  XAiK.follow(destino, distancia)  XAiK.stopFollow()  XAiK.stop()
+XAiK.walk("adelante"|"atras"|"izquierda"|"derecha"|Vector3, segundos)  XAiK.jump()  XAiK.sit()  XAiK.lookAt(destino)
+XAiK.equip("nombre")  XAiK.unequip()  XAiK.useTool()  XAiK.interact(destino)  (ProximityPrompt, ClickDetector o toque)
+XAiK.setSpeed(n)  XAiK.setJump(n)  XAiK.reset()  XAiK.players()  XAiK.findPlayer("nombre")  XAiK.position(destino)  XAiK.chat("mensaje")
+Ejemplo: ```lua
+print(XAiK.walkTo("Pedro"))
+```
 Atajos de ruta: "LocalPlayer", "Character", "workspace", "game.Servicio...".
 Puedes revisar TODO: consola, personaje, scripts, código, valores, remotes, GUIs. Úsalo libremente para entender el problema antes de actuar.
 Reglas:
-0) Si el usuario pide que le des un archivo, un script o que busques un código: búscalo ([[scripts: nombre]], [[buscar_codigo: texto]] o [[buscar: nombre]]) y luego usa [[codigo: ruta]] para mostrárselo completo. En tu respuesta di el nombre del script y su ruta. Si pide un archivo nuevo creado por ti, usa [[archivo: Nombre.lua]] + bloque de código.
+0) Si el usuario pide que le des un archivo, un script o que busques un código: búscalo ([[scripts: nombre]], [[buscar_codigo: texto]] o [[buscar: nombre]]) y luego usa [[codigo: ruta]] para mostrárselo completo. En tu respuesta di el nombre del script y su ruta. Si pide un archivo nuevo creado por ti, usa [[archivo: Nombre.lua]] + bloque de código. Si pide muchos o todos los scripts del juego como archivos, usa [[guardar_scripts]] o [[guardar_scripts: filtro]] y dile dónde quedaron.
 1) Antes de modificar algo, busca o inspecciona primero si no estás seguro de la ruta. Recibirás los resultados en el siguiente mensaje.
 2) Si encuentras lo que el usuario pidió, ejecuta el código para hacerlo (ej: velocidad -> LocalPlayer.Character.Humanoid.WalkSpeed = 50) y confirma con print.
 3) Si no encuentras coincidencia exacta, NO ejecutes; di qué encontraste parecido (rutas completas) y haz preguntas breves y numeradas con opciones, al estilo de Claude.
@@ -694,19 +1022,6 @@ function sendRequest(req, provider, model, retried, maxTokens)
     return text
 end
 
-local function addMessage(role, text, buttons)
-    local isUser = role == "user"
-    local title = isUser and (LocalPlayer and LocalPlayer.DisplayName or "Tú") or (role == "tool" and "XAiK · herramienta" or "XAiK")
-    return ChatTab:Paragraph({
-        Title = title,
-        Desc = text,
-        Image = isUser and "user" or (role == "tool" and "wrench" or "brain"),
-        ImageSize = 20,
-        Color = isUser and "Blue" or nil,
-        Buttons = buttons,
-    })
-end
-
 local function escapeRich(s)
     return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
 end
@@ -733,6 +1048,8 @@ local function parseTools(text)
     for f in text:gmatch("%[%[%s*scripts%s*:?%s*(.-)%s*%]%]") do table.insert(tools, { kind = "scripts", arg = f }) end
     for q in text:gmatch("%[%[%s*buscar_codigo%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "buscar_codigo", arg = q }) end
     for p in text:gmatch("%[%[%s*codigo%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "codigo", arg = p }) end
+    for m in text:gmatch("%[%[%s*chat%s*:%s*(.-)%s*%]%]") do table.insert(tools, { kind = "chat", arg = m }) end
+    for f in text:gmatch("%[%[%s*guardar_scripts%s*:?%s*(.-)%s*%]%]") do table.insert(tools, { kind = "guardar_scripts", arg = f }) end
     for lang, code in text:gmatch("```([%w_]*)[^\n]*\n(.-)```") do
         if isCodeBlock(lang) and code:find("%S") then
             table.insert(tools, { kind = "ejecutar", arg = code })
@@ -768,7 +1085,50 @@ local function copyButton(code)
     }
 end
 
-local function displayCode(name, location, className, src)
+local chatElements = {}
+local currentChat
+local chatCache = {}
+local chatsFolder = "XAiK/Chats"
+
+local function destroyElement(e)
+    if not e then return end
+    if pcall(function() e:Destroy() end) then return end
+    for _, key in ipairs({ "ElementFrame", "ParagraphFrame", "Frame", "Instance", "Object" }) do
+        local ok, inst = pcall(function() return e[key] end)
+        if ok and typeof(inst) == "Instance" then
+            pcall(function() inst:Destroy() end)
+            return
+        end
+    end
+    pcall(function() e.UIElements.Main:Destroy() end)
+end
+
+local function clearChatUI()
+    for _, e in ipairs(chatElements) do destroyElement(e) end
+    chatElements = {}
+end
+
+local function chatParagraph(opts)
+    local p = ChatTab:Paragraph(opts)
+    table.insert(chatElements, p)
+    return p
+end
+
+local function executeButton(code)
+    return {
+        Title = "Ejecutar",
+        Icon = "play",
+        Callback = function()
+            task.spawn(function()
+                local ok, out = runCode(code)
+                WindUI:Notify({ Title = "XAiK", Content = out:sub(1, 120), Icon = ok and "check" or "triangle-alert", Duration = 5 })
+            end)
+        end,
+    }
+end
+
+local function renderCode(entry)
+    local name, location, className, src = entry.name, entry.location, entry.className, entry.src
     local lineCount = select(2, src:gsub("\n", "\n")) + 1
     local chunks = {}
     local pos = 1
@@ -804,7 +1164,7 @@ local function displayCode(name, location, className, src)
         if i == 1 then
             header = "Nombre: " .. name .. "\nRuta: " .. location .. "\nTipo: " .. className .. "\nLíneas: " .. lineCount .. "\n\n"
         end
-        ChatTab:Paragraph({
+        chatParagraph({
             Title = "Código: " .. name .. (#chunks > 1 and (" (parte " .. i .. "/" .. #chunks .. ")") or ""),
             Desc = escapeRich(header .. chunk),
             Image = "file-code",
@@ -815,7 +1175,85 @@ local function displayCode(name, location, className, src)
     return lineCount
 end
 
+local function renderEntry(entry)
+    if entry.role == "code" then
+        renderCode(entry)
+        return nil
+    end
+    local isUser = entry.role == "user"
+    local buttons
+    if entry.pending then
+        buttons = { executeButton(entry.pending), copyButton(entry.pending) }
+    elseif entry.code then
+        buttons = { copyButton(entry.code), executeButton(entry.code) }
+    end
+    return chatParagraph({
+        Title = isUser and (LocalPlayer and LocalPlayer.DisplayName or "Tú") or (entry.role == "tool" and "XAiK · herramienta" or "XAiK"),
+        Desc = entry.text,
+        Image = isUser and "user" or (entry.role == "tool" and "wrench" or "brain"),
+        ImageSize = 20,
+        Color = isUser and "Blue" or nil,
+        Buttons = buttons,
+    })
+end
+
+local function addMessage(role, text, opts)
+    local entry = { role = role, text = text }
+    if opts then
+        for k, v in pairs(opts) do entry[k] = v end
+    end
+    table.insert(currentChat.messages, entry)
+    local p = renderEntry(entry)
+    return {
+        SetDesc = function(_, t)
+            entry.text = t
+            pcall(function() p:SetDesc(t) end)
+        end,
+    }
+end
+
+local function displayCode(name, location, className, src)
+    local entry = { role = "code", name = name, location = location, className = className, src = src }
+    table.insert(currentChat.messages, entry)
+    return renderCode(entry)
+end
+
+local welcomeText = "Hola, soy XAiK. Configura tu Api-Key en la pestaña XAiK Configuration. Puedo revisar la consola, tu personaje, todos los scripts y su código, controlar tu personaje, escribir en el chat y ejecutar código. Prueba: \"camina hacia el jugador más cercano\" o \"dame el código del script de las armas\"."
+
+local function startChat()
+    currentChat = { id = tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)), title = "Nueva conversación", created = os.time(), updated = os.time(), provider = config.provider, messages = {}, history = {} }
+    history = currentChat.history
+end
+
+local function saveChat()
+    if not currentChat or #currentChat.messages == 0 then return end
+    currentChat.history = history
+    currentChat.updated = os.time()
+    currentChat.provider = config.provider
+    chatCache[currentChat.id] = currentChat
+    pcall(function()
+        if not isfolder("XAiK") then makefolder("XAiK") end
+        if not isfolder(chatsFolder) then makefolder(chatsFolder) end
+        writefile(chatsFolder .. "/" .. currentChat.id .. ".json", HttpService:JSONEncode(currentChat))
+    end)
+end
+
+local function loadChatsFromDisk()
+    pcall(function()
+        if not (listfiles and isfolder and isfolder(chatsFolder)) then return end
+        for _, path in ipairs(listfiles(chatsFolder)) do
+            if path:sub(-5) == ".json" then
+                local ok, data = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+                if ok and type(data) == "table" and data.id and type(data.messages) == "table" then
+                    chatCache[data.id] = data
+                end
+            end
+        end
+    end)
+end
+
 local processing = false
+local refreshHistory
 local currentMessage = ""
 local MessageInput
 
@@ -872,6 +1310,10 @@ local function agentLoop(userText)
                 local path = saveExport(tool.arg, tool.code)
                 displayCode(tool.arg, path and ("workspace del executor/" .. path) or "Generado por XAiK", "Archivo", tool.code)
                 table.insert(results, "[archivo: " .. tool.arg .. "] Mostrado al usuario" .. (path and (" y guardado en " .. path) or " (no se pudo guardar)") .. ".")
+            elseif tool.kind == "chat" then
+                local ok, info = Control.chat(tool.arg)
+                addMessage("tool", (ok and "Mensaje enviado al chat: " or "No se pudo enviar al chat: ") .. tool.arg)
+                table.insert(results, "[chat] " .. (ok and "Enviado: " .. tool.arg or "Falló: " .. tostring(info)))
             elseif not config.allowScan then
                 table.insert(results, "[" .. tool.kind .. "] El escaneo está desactivado por el usuario.")
             elseif tool.kind == "consola" then
@@ -886,6 +1328,11 @@ local function agentLoop(userText)
             elseif tool.kind == "buscar_codigo" then
                 addMessage("tool", "Buscando en el código: " .. tool.arg)
                 table.insert(results, "[buscar_codigo: " .. tool.arg .. "]\n" .. searchCode(tool.arg):sub(1, 6000))
+            elseif tool.kind == "guardar_scripts" then
+                addMessage("tool", "Guardando scripts del juego" .. (tool.arg ~= "" and (": " .. tool.arg) or "") .. "...")
+                local report = dumpScripts(tool.arg)
+                addMessage("tool", report:sub(1, 1500))
+                table.insert(results, "[guardar_scripts]\n" .. report:sub(1, 4000))
             elseif tool.kind == "codigo" then
                 local inst = resolvePath(tool.arg)
                 local isScript = inst and select(2, pcall(function() return inst:IsA("LuaSourceContainer") end)) == true
@@ -907,7 +1354,7 @@ local function agentLoop(userText)
                 if config.autoExec then
                     local code = tool.arg
                     local ok, out = runCode(code)
-                    addMessage("tool", (ok and "Script ejecutado\n" or "Fallo al ejecutar\n") .. out:sub(1, 500), { copyButton(code) })
+                    addMessage("tool", (ok and "Script ejecutado\n" or "Fallo al ejecutar\n") .. out:sub(1, 500), { code = code })
                     table.insert(results, "[ejecutar]\n" .. out:sub(1, 3000))
                 else
                     table.insert(pendingCode, tool.arg)
@@ -916,19 +1363,7 @@ local function agentLoop(userText)
         end
 
         for _, code in ipairs(pendingCode) do
-            addMessage("tool", "Script listo (ejecución automática desactivada)", {
-                {
-                    Title = "Ejecutar",
-                    Icon = "play",
-                    Callback = function()
-                        task.spawn(function()
-                            local ok, out = runCode(code)
-                            WindUI:Notify({ Title = "XAiK", Content = out:sub(1, 120), Icon = ok and "check" or "triangle-alert", Duration = 5 })
-                        end)
-                    end,
-                },
-                copyButton(code),
-            })
+            addMessage("tool", "Script listo (ejecución automática desactivada)", { pending = code })
         end
 
         if #results == 0 then return end
@@ -948,14 +1383,121 @@ local function sendMessage()
     if text == "" then return end
     currentMessage = ""
     pcall(function() MessageInput:Set("") end)
+    if currentChat.title == "Nueva conversación" then
+        currentChat.title = text:gsub("%s+", " "):sub(1, 50)
+    end
     addMessage("user", text)
+    saveChat()
     processing = true
     task.spawn(function()
         local ok, err = pcall(agentLoop, text)
         if not ok then addMessage("ai", "Error interno: " .. tostring(err)) end
         processing = false
+        saveChat()
+        pcall(refreshHistory)
     end)
 end
+
+local function newChat()
+    if processing then
+        WindUI:Notify({ Title = "XAiK", Content = "Espera a que termine la respuesta.", Icon = "loader", Duration = 3 })
+        return
+    end
+    saveChat()
+    clearChatUI()
+    startChat()
+    renderEntry({ role = "ai", text = welcomeText })
+    pcall(refreshHistory)
+    WindUI:Notify({ Title = "XAiK", Content = "Nueva conversación iniciada.", Icon = "check", Duration = 3 })
+end
+
+local function openChat(id)
+    if processing then
+        WindUI:Notify({ Title = "XAiK", Content = "Espera a que termine la respuesta.", Icon = "loader", Duration = 3 })
+        return
+    end
+    local chat = chatCache[id]
+    if not chat then return end
+    saveChat()
+    clearChatUI()
+    chat.history = chat.history or {}
+    currentChat = chat
+    history = chat.history
+    for _, entry in ipairs(chat.messages) do
+        pcall(renderEntry, entry)
+    end
+    pcall(refreshHistory)
+    pcall(function() Window:SelectTab(1) end)
+    WindUI:Notify({ Title = "XAiK", Content = "Conversación abierta: " .. tostring(chat.title), Icon = "folder-open", Duration = 3 })
+end
+
+local function deleteChat(id)
+    if processing and currentChat and currentChat.id == id then return end
+    chatCache[id] = nil
+    pcall(function() delfile(chatsFolder .. "/" .. id .. ".json") end)
+    if currentChat and currentChat.id == id then
+        currentChat.messages = {}
+        newChat()
+    else
+        pcall(refreshHistory)
+    end
+    WindUI:Notify({ Title = "XAiK", Content = "Conversación borrada.", Icon = "trash-2", Duration = 3 })
+end
+
+local historyElements = {}
+
+function refreshHistory()
+    for _, e in ipairs(historyElements) do destroyElement(e) end
+    historyElements = {}
+    local list = {}
+    for _, c in pairs(chatCache) do table.insert(list, c) end
+    table.sort(list, function(a, b) return (a.updated or 0) > (b.updated or 0) end)
+    if #list == 0 then
+        table.insert(historyElements, HistoryTab:Paragraph({
+            Title = "Sin conversaciones",
+            Desc = "Tus chats guardados aparecerán aquí.",
+            Image = "inbox",
+            ImageSize = 18,
+        }))
+        return
+    end
+    for i, c in ipairs(list) do
+        if i > 60 then break end
+        local id = c.id
+        local userCount = 0
+        for _, m in ipairs(c.messages or {}) do
+            if m.role == "user" then userCount = userCount + 1 end
+        end
+        local isCurrent = currentChat and currentChat.id == id
+        table.insert(historyElements, HistoryTab:Paragraph({
+            Title = (isCurrent and "(Actual) " or "") .. tostring(c.title or "Conversación"),
+            Desc = os.date("%d/%m/%Y %H:%M", c.updated or c.created or 0) .. "  |  " .. userCount .. " mensajes  |  " .. tostring(c.provider or ""),
+            Image = "message-square",
+            ImageSize = 18,
+            Buttons = {
+                { Title = "Abrir", Icon = "folder-open", Callback = function() openChat(id) end },
+                { Title = "Borrar", Icon = "trash-2", Callback = function() deleteChat(id) end },
+            },
+        }))
+    end
+end
+
+HistoryTab:Section({ Title = "Historial de chats" })
+
+HistoryTab:Button({
+    Title = "Nueva conversación",
+    Icon = "plus",
+    Callback = newChat,
+})
+
+HistoryTab:Button({
+    Title = "Actualizar lista",
+    Icon = "refresh-cw",
+    Callback = function()
+        loadChatsFromDisk()
+        refreshHistory()
+    end,
+})
 
 ChatTab:Section({ Title = "Conversación" })
 
@@ -978,14 +1520,14 @@ ChatTab:Button({
 
 ChatTab:Button({
     Title = "Nueva conversación",
-    Icon = "rotate-ccw",
-    Callback = function()
-        history = {}
-        WindUI:Notify({ Title = "XAiK", Content = "Historial borrado.", Icon = "check", Duration = 3 })
-    end,
+    Icon = "plus",
+    Callback = newChat,
 })
 
-addMessage("ai", "Hola, soy XAiK. Configura tu Api-Key en la pestaña XAiK Configuration. Puedo revisar la consola, tu personaje, todos los scripts y su código, valores y RemoteEvents, y ejecutar código. Prueba: \"pon mi velocidad en 50\" o \"dame el código del script que maneja las armas\".")
+startChat()
+renderEntry({ role = "ai", text = welcomeText })
+loadChatsFromDisk()
+refreshHistory()
 
 ConfigTab:Section({ Title = "Inteligencia Artificial" })
 
