@@ -55,7 +55,7 @@ local function detectProvider(key)
 end
 
 local configPath = "XAiK/config.json"
-local config = { apiKey = "", provider = "Claude", model = "", allowScan = true, autoExec = true, perf = "Bajo" }
+local config = { apiKey = "", provider = "Claude", model = "", allowScan = true, autoExec = true, perf = "Bajo", customInstructions = "" }
 
 pcall(function()
     if isfile and isfile(configPath) then
@@ -909,7 +909,7 @@ local function runCode(code)
     return true, msg
 end
 
-local systemPrompt = [=[Eres XAiK, un agente dentro de un script de Roblox ejecutado en un executor como Arceus X o Delta (cliente). Hablas español.
+local baseSystemPrompt = [=[Eres XAiK, un agente dentro de un script de Roblox ejecutado en un executor como Arceus X o Delta (cliente). Hablas español.
 Tienes HERRAMIENTAS. Para usarlas escribe exactamente estas etiquetas en tu respuesta:
 [[buscar: texto]]  busca instancias por nombre, clase, propiedad o atributo (ej: [[buscar: WalkSpeed]], [[buscar: coins]]).
 [[inspeccionar: ruta]]  muestra propiedades, atributos, hijos y código de una instancia (ej: [[inspeccionar: Character.Humanoid]], [[inspeccionar: game.ReplicatedStorage.Remotes]]).
@@ -1004,6 +1004,11 @@ end
 function sendRequest(req, provider, model, retried, maxTokens)
     maxTokens = maxTokens or 4096
     local url, body, headers
+    local systemPrompt = baseSystemPrompt
+    local custom = tostring(config.customInstructions or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if custom ~= "" then
+        systemPrompt = systemPrompt .. "\n\nINSTRUCCIONES PERSONALIZADAS DEL USUARIO (síguelas siempre, tienen prioridad sobre tu estilo por defecto, pero no sobre el formato de las herramientas):\n" .. custom
+    end
     if config.provider == "Claude" then
         url = provider.url
         body = HttpService:JSONEncode({ model = model, max_tokens = maxTokens, system = systemPrompt, messages = history })
@@ -1887,6 +1892,32 @@ ModelInput = ConfigTab:Input({
     Callback = function(text)
         config.model = text
         saveConfig()
+    end,
+})
+
+ConfigTab:Section({ Title = "Instrucciones personalizadas" })
+
+local CustomInput = ConfigTab:Input({
+    Title = "Instrucciones",
+    Desc = "Cómo quieres que responda y actúe la IA. Se aplica a todos los chats.",
+    Placeholder = "ej: Responde corto, llámame Gera, usa velocidad 32 por defecto...",
+    Value = config.customInstructions,
+    Type = "Textarea",
+    Icon = "scroll-text",
+    Callback = function(text)
+        config.customInstructions = text
+        saveConfig()
+    end,
+})
+
+ConfigTab:Button({
+    Title = "Borrar instrucciones",
+    Icon = "eraser",
+    Callback = function()
+        config.customInstructions = ""
+        saveConfig()
+        pcall(function() CustomInput:Set("") end)
+        WindUI:Notify({ Title = "XAiK", Content = "Instrucciones personalizadas borradas.", Icon = "check", Duration = 3 })
     end,
 })
 
