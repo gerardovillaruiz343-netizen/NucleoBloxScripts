@@ -1180,7 +1180,27 @@ local function copyButton(code)
 end
 
 local chatElements = {}
+local chatScroll
 local currentChat
+
+local function scrollChatToBottom(force)
+    if not chatScroll then return end
+    if not force then
+        local near = true
+        pcall(function()
+            local maxY = chatScroll.AbsoluteCanvasSize.Y - chatScroll.AbsoluteWindowSize.Y
+            near = chatScroll.CanvasPosition.Y >= maxY - 250
+        end)
+        if not near then return end
+    end
+    task.defer(function()
+        task.wait()
+        pcall(function()
+            local maxY = chatScroll.AbsoluteCanvasSize.Y - chatScroll.AbsoluteWindowSize.Y
+            chatScroll.CanvasPosition = Vector2.new(0, math.max(0, maxY))
+        end)
+    end)
+end
 local chatCache = {}
 local chatsFolder = "XAiK/Chats"
 
@@ -1208,6 +1228,7 @@ local function chatParagraph(opts)
     if #chatElements > 120 then
         for _ = 1, 20 do destroyElement(table.remove(chatElements, 1)) end
     end
+    scrollChatToBottom()
     return p
 end
 
@@ -1305,10 +1326,12 @@ local function addMessage(role, text, opts)
     end
     table.insert(currentChat.messages, entry)
     local p = renderEntry(entry)
+    if role == "user" then scrollChatToBottom(true) end
     return {
         SetDesc = function(_, t)
             entry.text = t
             pcall(function() p:SetDesc(t) end)
+            scrollChatToBottom()
         end,
     }
 end
@@ -1618,24 +1641,189 @@ HistoryTab:Button({
     end,
 })
 
-ChatTab:Section({ Title = "Conversación" })
+local chatMarker = "Conversación"
+ChatTab:Section({ Title = chatMarker })
 
-MessageInput = ChatTab:Input({
-    Title = "Mensaje",
-    Placeholder = "Ingresa tu mensaje",
-    Value = "",
-    Type = "Input",
-    Icon = "message-square",
-    Callback = function(text)
-        currentMessage = text
-    end,
-})
+local function findChatScroll()
+    local roots = {}
+    pcall(function() if gethui then table.insert(roots, gethui()) end end)
+    pcall(function() table.insert(roots, game:GetService("CoreGui")) end)
+    pcall(function() table.insert(roots, LocalPlayer:FindFirstChildOfClass("PlayerGui")) end)
+    for _, r in ipairs(roots) do
+        local found
+        pcall(function()
+            for _, d in ipairs(r:GetDescendants()) do
+                if d:IsA("TextLabel") and d.Text == chatMarker then
+                    local sf = d:FindFirstAncestorWhichIsA("ScrollingFrame")
+                    if sf then
+                        found = sf
+                        break
+                    end
+                end
+            end
+        end)
+        if found then return found end
+    end
+    return nil
+end
 
-ChatTab:Button({
-    Title = "Enviar",
-    Icon = "send",
-    Callback = sendMessage,
-})
+local function guiOnScreen(gui)
+    local cur = gui
+    while cur and cur:IsA("GuiObject") do
+        if not cur.Visible then return false end
+        if cur:IsA("CanvasGroup") and cur.GroupTransparency > 0.9 then return false end
+        cur = cur.Parent
+    end
+    if cur and cur:IsA("LayerCollector") and not cur.Enabled then return false end
+    local parent = gui.Parent
+    if parent and parent:IsA("GuiObject") then
+        if math.abs(gui.AbsolutePosition.X - parent.AbsolutePosition.X) > parent.AbsoluteSize.X * 0.5 then return false end
+    end
+    return gui.AbsoluteSize.X > 80 and gui.AbsoluteSize.Y > 80
+end
+
+local function buildFixedInput(scroll)
+    local windGui = scroll:FindFirstAncestorWhichIsA("LayerCollector")
+    if not windGui or not windGui.Parent then return false end
+    pcall(function()
+        local old = windGui.Parent:FindFirstChild("XAiK_InputBar")
+        if old then old:Destroy() end
+    end)
+
+    local barGui = Instance.new("ScreenGui")
+    barGui.Name = "XAiK_InputBar"
+    barGui.ResetOnSpawn = false
+    barGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    pcall(function() barGui.IgnoreGuiInset = windGui.IgnoreGuiInset end)
+    pcall(function() barGui.DisplayOrder = windGui.DisplayOrder + 1 end)
+    barGui.Parent = windGui.Parent
+
+    local bar = Instance.new("Frame")
+    bar.Name = "Bar"
+    bar.Size = UDim2.fromOffset(300, 50)
+    bar.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+    bar.BackgroundTransparency = 0.05
+    bar.BorderSizePixel = 0
+    bar.Visible = false
+    bar.Parent = barGui
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 14)
+    local stroke = Instance.new("UIStroke", bar)
+    stroke.Color = Color3.fromRGB(90, 90, 110)
+    stroke.Transparency = 0.4
+    stroke.Thickness = 1
+
+    local box = Instance.new("TextBox")
+    box.Name = "MessageBox"
+    box.BackgroundTransparency = 1
+    box.Position = UDim2.new(0, 14, 0, 4)
+    box.Size = UDim2.new(1, -72, 1, -8)
+    box.Font = Enum.Font.Gotham
+    box.TextSize = 14
+    box.Text = ""
+    box.PlaceholderText = "Ingresa tu mensaje"
+    box.PlaceholderColor3 = Color3.fromRGB(140, 140, 155)
+    box.TextColor3 = Color3.fromRGB(240, 240, 245)
+    box.TextXAlignment = Enum.TextXAlignment.Left
+    box.ClearTextOnFocus = false
+    box.TextTruncate = Enum.TextTruncate.AtEnd
+    box.Parent = bar
+
+    local send = Instance.new("TextButton")
+    send.Name = "Send"
+    send.AnchorPoint = Vector2.new(1, 0.5)
+    send.Position = UDim2.new(1, -7, 0.5, 0)
+    send.Size = UDim2.fromOffset(44, 36)
+    send.BackgroundColor3 = Color3.fromRGB(110, 92, 255)
+    send.AutoButtonColor = true
+    send.Text = "Enviar"
+    send.TextScaled = true
+    send.Font = Enum.Font.GothamBold
+    send.TextColor3 = Color3.fromRGB(255, 255, 255)
+    send.Parent = bar
+    Instance.new("UICorner", send).CornerRadius = UDim.new(0, 10)
+
+    pcall(function()
+        local icon = WindUI.Creator.Icon("send")
+        if icon and icon[1] then
+            local img = Instance.new("ImageLabel")
+            img.BackgroundTransparency = 1
+            img.AnchorPoint = Vector2.new(0.5, 0.5)
+            img.Position = UDim2.fromScale(0.5, 0.5)
+            img.Size = UDim2.fromOffset(20, 20)
+            img.Image = icon[1]
+            local rect = icon[2] or {}
+            if rect.ImageRectSize then img.ImageRectSize = rect.ImageRectSize end
+            if rect.ImageRectPosition or rect.ImageRectOffset then img.ImageRectOffset = rect.ImageRectPosition or rect.ImageRectOffset end
+            img.ImageColor3 = Color3.fromRGB(255, 255, 255)
+            img.Parent = send
+            send.Text = ""
+        end
+    end)
+
+    box:GetPropertyChangedSignal("Text"):Connect(function()
+        currentMessage = box.Text
+    end)
+    box.FocusLost:Connect(function(enter)
+        if enter then sendMessage() end
+    end)
+    send.MouseButton1Click:Connect(sendMessage)
+
+    MessageInput = {
+        Set = function(_, value)
+            box.Text = value
+        end,
+    }
+
+    pcall(function()
+        local pad = scroll:FindFirstChildOfClass("UIPadding") or Instance.new("UIPadding", scroll)
+        pad.PaddingBottom = UDim.new(0, 70)
+    end)
+
+    local conn
+    conn = RunService.RenderStepped:Connect(function()
+        if not scroll.Parent or not barGui.Parent then
+            conn:Disconnect()
+            pcall(function() barGui:Destroy() end)
+            return
+        end
+        local visible = guiOnScreen(scroll)
+        bar.Visible = visible
+        if visible then
+            local p, s = scroll.AbsolutePosition, scroll.AbsoluteSize
+            bar.Position = UDim2.fromOffset(p.X + 6, p.Y + s.Y - 56)
+            bar.Size = UDim2.fromOffset(math.max(s.X - 12, 140), 50)
+        elseif box:IsFocused() then
+            box:ReleaseFocus()
+        end
+    end)
+    return true
+end
+
+for _ = 1, 10 do
+    chatScroll = findChatScroll()
+    if chatScroll then break end
+    task.wait(0.1)
+end
+
+if not (chatScroll and buildFixedInput(chatScroll)) then
+    chatScroll = nil
+    MessageInput = ChatTab:Input({
+        Title = "Mensaje",
+        Placeholder = "Ingresa tu mensaje",
+        Value = "",
+        Type = "Input",
+        Icon = "message-square",
+        Callback = function(text)
+            currentMessage = text
+        end,
+    })
+
+    ChatTab:Button({
+        Title = "Enviar",
+        Icon = "send",
+        Callback = sendMessage,
+    })
+end
 
 ChatTab:Button({
     Title = "Nueva conversación",
